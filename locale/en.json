@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tool Manager",
+    "description": "Block or enable tools and runtime context injections for the clean-agent preset. The configuration is stored in ~/.dsh/tool-manager.json and read by the preset's clean-tool-filter."
+  }
+}

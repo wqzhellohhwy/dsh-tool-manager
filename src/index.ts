@@ -50,7 +50,7 @@ type AppContext = Context & {
 }
 
 export const name = '@dsh-external/dsh-tool-manager'
-export const inject: string[] = []
+export const inject: string[] = ['webServer']
 
 function dshHome(): string {
   return process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -146,7 +146,8 @@ function classify(name: string): string {
   if (name.startsWith('dev_') || name.startsWith('memory') || name.startsWith('dtodo')
     || name.startsWith('skill_manage') || name.startsWith('undo_') || name.startsWith('redteam_')
     || name.startsWith('ssh_') || name.startsWith('context_audit') || name.startsWith('describe_image')
-    || name.startsWith('de_') || name.startsWith('anysearch_') || name.startsWith('file_mount_forget')) return 'third'
+    || name.startsWith('de_') || name.startsWith('anysearch_') || name.startsWith('file_mount_forget')
+    || name.startsWith('mcp_connector_')) return 'third'
   return 'native'
 }
 
@@ -165,6 +166,7 @@ const THIRD_PLUGIN_MAP: Array<[string, string]> = [
   ['redteam_', 'redteam'],
   ['describe_image', 'describe-image'],
   ['file_mount_forget', 'dsh-file-mount'],
+  ['mcp_connector_', 'dsh-mcp-connector'],
 ]
 
 // 计算工具的分组键:mcp 按 server 名、third 按归属插件、其余按 category。

@@ -81,6 +81,7 @@ const EMPTY_CONFIG: Config = {
 const DEFAULT_THIRD_PREFIXES = [
   'dev_', 'memory', 'dtodo', 'skill_manage', 'undo_', 'redteam_',
   'ssh_', 'context_audit', 'describe_image', 'de_', 'file_mount_forget',
+  'mcp_connector_',
 ]
 
 // 第三方插件工具完整前缀(与 host classify 一致,含预设名单外的 anysearch_ 等,
@@ -88,7 +89,7 @@ const DEFAULT_THIRD_PREFIXES = [
 const THIRD_PREFIXES = [
   'dev_mode_', 'dev_', 'anysearch_', 'memory', 'dtodo', 'skill_manage',
   'de_', 'undo_', 'context_audit', 'ssh_', 'redteam_', 'describe_image',
-  'file_mount_forget',
+  'file_mount_forget', 'mcp_connector_',
 ]
 
 const LOCK_ICON: Record<LockState, string> = { enabled: '🟢', disabled: '🔴' }
@@ -196,6 +197,10 @@ function ToolManagerSection(): ReactElement {
 
   useEffect(() => {
     const style = document.createElement('style')
+    // data-plugin 归属必须显式写：DSH 的 claimStyles 会把没有该属性的 <style>
+    // 认领给「刚物化的另一个插件」，那个插件重载/回收时（removeOwnedStyles）
+    // 就会把这里的样式一起删掉 —— 表现为整页 UI 变成没有 CSS 的裸控件。
+    style.setAttribute('data-plugin', '@dsh-external/dsh-tool-manager')
     style.textContent = styles
     document.head.appendChild(style)
     return () => { style.remove() }
@@ -212,6 +217,17 @@ function ToolManagerSection(): ReactElement {
     return false
   }
 
+  /**
+   * 该类工具「启用」时必须补写 allowNames 才能生效:它们除了 denyNames 之外
+   * 还有一层兜底判定,仅把名字从 denyNames 移除不足以让它们可见。
+   *   - MCP(mcp__*)      : isEffectivelyDenied 走 newDefault.mcp 兜底,
+   *                        默认禁用时无条件判禁,与 denyNames 内容无关。
+   *   - 第三方前缀        : DEFAULT_THIRD_PREFIXES 命中即无条件判禁。
+   * 两者统一走 allowNames(判定链中优先级最高)豁免,保证启用/禁用双向都真实生效。
+   */
+  const needsAllowExemption = (name: string): boolean =>
+    name.startsWith('mcp__') || DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p))
+
   // 把单个工具设为启用/禁用,返回新 Config(双向清理 allow/deny 名单,避免残留复活)。
   const applyDeny = (cfg0: Config, name: string, denied: boolean): Config => {
     const next: Config = { ...cfg0, denyNames: [...cfg0.denyNames], allowNames: [...cfg0.allowNames] }
@@ -220,7 +236,7 @@ function ToolManagerSection(): ReactElement {
       next.allowNames = next.allowNames.filter((n) => n !== name)
     } else {
       next.denyNames = next.denyNames.filter((n) => n !== name)
-      if (DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p)) && !next.allowNames.includes(name)) {
+      if (needsAllowExemption(name) && !next.allowNames.includes(name)) {
         next.allowNames.push(name)
       }
     }

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "工具管理",
+    "description": "按纯净预设(clean-agent)屏蔽或启用工具与运行时上下文注入:配置写入 ~/.dsh/tool-manager.json,由预设内的 clean-tool-filter 读取并即时生效。"
+  }
+}
