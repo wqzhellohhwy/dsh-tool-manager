@@ -28,6 +28,10 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import type { Context } from 'cordis'
+import { CLEAN_AGENT_PRESET_ID, buildCleanAgentPreset } from './preset'
+
+// 供测试与外部消费：内置预设的 id 与构造函数。
+export { CLEAN_AGENT_PRESET_ID, buildCleanAgentPreset } from './preset'
 
 type AppContext = Context & {
   webServer?: {
@@ -50,10 +54,20 @@ type AppContext = Context & {
       contexts?: Array<{ name?: string }>
     }>
   }
+  /** cordis 依赖注入：等服务可用后回调（服务未装配时不回调，也不报错）。 */
+  inject?: (deps: string[], callback: (child: AppContext) => void) => unknown
+  /** DSH 的 agent preset 注册表（@deepseek-ai/dsh-agent-preset-registry）。 */
+  agentPresets?: {
+    definitions?: Map<string, { config?: { id?: string }; broken?: string }>
+    register(definition: unknown): Promise<() => Promise<void> | void>
+  }
 }
 
 export const name = '@dsh-external/dsh-tool-manager'
-export const inject: string[] = ['webServer']
+// 刻意**不**硬依赖 webServer：内置 clean-agent 预设的注册与 GUI API 无关，
+// 若把 'webServer' 写进 inject，插件在无 HTTP 服务的 profile（headless / tui）
+// 里会整体 pending —— 预设装不进去、连日志都没有。所有服务消费都走 ctx.get 判空。
+export const inject: string[] = []
 
 function dshHome(): string {
   return process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -251,8 +265,56 @@ function json(res: any, code: number, obj: unknown): void {
   res.end(JSON.stringify(obj))
 }
 
+/**
+ * 注册内置的 `clean-agent` 纯净预设 —— 预设定义与过滤器随本插件发布，
+ * 因此不需要任何外部仓库，也不需要在 profile 的 cordis.patch.yml 里手写 preset 行。
+ *
+ * 幂等与优先级：profile 里若已声明同名预设（`agentPresets.definitions` 命中），
+ * 本函数直接跳过 —— profile 定义优先，避免 `Duplicate agent preset` 抛错，
+ * 也保证升级/迁移期间不会出现两个来源打架。
+ *
+ * 注意 register() 会**立即** mountPreset 挂载 plugins；若某个 composition 模块
+ * 解析失败，registry 不抛错而是把错误记在 `definitions.get(id).broken`，
+ * 这里读回来打日志，避免"注册成功但预设其实是坏的"这种静默失败。
+ */
+async function registerCleanAgentPreset(ctx: AppContext, logger?: { info?: (m: string) => void; warn?: (m: string) => void }): Promise<void> {
+  const registry = ctx.get?.('agentPresets') as AppContext['agentPresets'] | undefined
+  if (!registry || typeof registry.register !== 'function') {
+    logger?.info?.('[tool-manager] agentPresets 服务不可用,跳过内置 clean-agent 预设注册')
+    return
+  }
+  const definitions = registry.definitions
+  if (definitions && typeof definitions.has === 'function' && definitions.has(CLEAN_AGENT_PRESET_ID)) {
+    logger?.info?.(`[tool-manager] 预设 ${CLEAN_AGENT_PRESET_ID} 已由 profile 定义,跳过内置注册`)
+    return
+  }
+  try {
+    const dispose = await registry.register(buildCleanAgentPreset())
+    // 生命周期随本插件行：插件停用/重载时预设一并撤下，不留孤儿定义。
+    ctx.effect?.(() => dispose, 'tool-manager: clean-agent preset')
+    const broken = registry.definitions?.get(CLEAN_AGENT_PRESET_ID)?.broken
+    if (broken) {
+      logger?.warn?.(`[tool-manager] 内置预设 ${CLEAN_AGENT_PRESET_ID} 装配失败: ${broken}`)
+    } else {
+      logger?.info?.(`[tool-manager] 已注册内置预设 ${CLEAN_AGENT_PRESET_ID}`)
+    }
+  } catch (error) {
+    logger?.warn?.(`[tool-manager] 内置预设注册失败: ${(error as Error)?.message ?? error}`)
+  }
+}
+
 export function apply(ctx: AppContext): void {
-  const logger = ctx.get?.('logger') as { info?: (msg: string) => void } | undefined
+  const logger = ctx.get?.('logger') as { info?: (msg: string) => void; warn?: (msg: string) => void } | undefined
+
+  // 预设注册与 webServer 无关，先行注册：等 agentPresets 服务就绪后回调。
+  // 用 ctx.inject 而不是把 'agentPresets' 写进 inject —— 后者会让本插件在
+  // 没有该服务的 profile（如 headless）里整体不装配，连 GUI API 一起消失。
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['agentPresets'], (child) => { void registerCleanAgentPreset(child, logger) })
+  } else {
+    void registerCleanAgentPreset(ctx, logger)
+  }
+
   const webServer = ctx.get?.('webServer')
   if (!webServer) {
     logger?.info?.('[tool-manager] webServer 服务不可用,跳过 API 注册')

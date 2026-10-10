@@ -149,10 +149,12 @@ test('上下文分组启停:全部启用/全部禁用', () => {
   }
 })
 
-// ── 5. 与运行中的过滤器常量保持一致(防止两处名单漂移)─────────────────────
-test('client 前缀表与 clean-tool-filter.mjs 的名单一致', () => {
+// ── 5. 与插件自带的过滤器常量保持一致(防止两处名单漂移)───────────────────
+test('client 前缀表与 src/preset-filter.ts 的名单一致', () => {
+  // 过滤器随本插件发布(src/preset-filter.ts → lib/preset-filter.js)，因此比对
+  // 仓库内的源文件，而不是某个 profile 目录下的副本。
   const filterPath = process.env.TM_FILTER_PATH
-    || 'C:/Users/53518/.dsh/profiles/desktop/clean-tool-filter.mjs'
+    || join(here, '..', 'src', 'preset-filter.ts')
   const src = readFileSync(filterPath, 'utf8')
 
   const pick = (constName) => {
@@ -162,7 +164,7 @@ test('client 前缀表与 clean-tool-filter.mjs 的名单一致', () => {
   }
 
   assert.deepEqual(DEFAULT_THIRD_PREFIXES, pick('DEFAULT_DENY_PREFIXES'),
-    'client DEFAULT_THIRD_PREFIXES 必须与 filter DEFAULT_DENY_PREFIXES 完全一致')
+    'client DEFAULT_THIRD_PREFIXES 必须与 preset-filter DEFAULT_DENY_PREFIXES 完全一致')
   assert.deepEqual(THIRD_PREFIXES, pick('THIRD_PREFIXES'),
-    'client THIRD_PREFIXES 必须与 filter THIRD_PREFIXES 完全一致')
+    'client THIRD_PREFIXES 必须与 preset-filter THIRD_PREFIXES 完全一致')
 })

@@ -36,6 +36,39 @@ const clientBundle: UserConfig = {
 }
 
 /**
+ * host 半侧入口(ESM, node)。两个入口各自单独打一份 —— rolldown 在多入口下
+ * 不允许关闭 code splitting，而我们要求产物是扁平的 lib/index.js 与
+ * lib/preset-filter.js（后者必须能被包名子路径独立解析）。
+ */
+const hostIndexBundle: UserConfig = {
+  entry: { index: 'src/index.ts' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  outputOptions: {
+    entryFileNames: '[name].js',
+    codeSplitting: false,
+  },
+}
+
+const hostFilterBundle: UserConfig = {
+  entry: { 'preset-filter': 'src/preset-filter.ts' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  outputOptions: {
+    entryFileNames: '[name].js',
+    codeSplitting: false,
+  },
+}
+
+/**
  * 测试用入口:把判定纯逻辑打成 lib/decide.mjs,供 tests/decide.test.mjs
  * (node --test)直接 import —— 避免测试去解析 React 组件里未被导出的闭包函数。
  */
@@ -53,4 +86,4 @@ const decideBundle: UserConfig = {
   },
 }
 
-export default [clientBundle, decideBundle] satisfies UserConfig[]
+export default [clientBundle, hostIndexBundle, hostFilterBundle, decideBundle] satisfies UserConfig[]
