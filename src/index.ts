@@ -306,62 +306,74 @@ async function registerCleanAgentPreset(ctx: AppContext, logger?: { info?: (m: s
 export function apply(ctx: AppContext): void {
   const logger = ctx.get?.('logger') as { info?: (msg: string) => void; warn?: (msg: string) => void } | undefined
 
-  // 预设注册与 webServer 无关，先行注册：等 agentPresets 服务就绪后回调。
-  // 用 ctx.inject 而不是把 'agentPresets' 写进 inject —— 后者会让本插件在
-  // 没有该服务的 profile（如 headless）里整体不装配，连 GUI API 一起消失。
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['agentPresets'], (child) => { void registerCleanAgentPreset(child, logger) })
-  } else {
-    void registerCleanAgentPreset(ctx, logger)
+  // 统一的等待服务方式：不把服务写进 `inject`（硬依赖会让插件在没有该服务的
+  // profile 里**整体 pending**，连无关功能一起消失），而是在 apply 里用
+  // ctx.inject 等它就绪再回调。
+  //
+  // ⚠️ 2026-10-11 回归修复：只把 `inject` 改成空数组是不够的 —— apply 会在
+  // webServer 服务注册**之前**执行，此时 ctx.get('webServer') 是 undefined，
+  // 旧写法直接 return，于是 /tool-manager/api 根本没挂上（GUI 侧表现为
+  // "无法连接 host API … Unexpected end of JSON input"，实际是 404 空响应）。
+  // 正确写法：注册动作本身放进 ctx.inject(['webServer'], …) 的回调里。
+  const whenService = (deps: string[], run: (child: AppContext) => void): void => {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(deps, (child) => run(child))
+    } else {
+      run(ctx)
+    }
   }
 
-  const webServer = ctx.get?.('webServer')
-  if (!webServer) {
-    logger?.info?.('[tool-manager] webServer 服务不可用,跳过 API 注册')
-    return
-  }
+  // ① 内置 clean-agent 预设：与 webServer 无关，等 agentPresets 就绪即注册。
+  whenService(['agentPresets'], (child) => { void registerCleanAgentPreset(child, logger) })
 
-  ctx.effect(() => webServer.register({
-    kind: 'prefix',
-    path: '/tool-manager/api',
-    handler: async (req: any, res: any) => {
-      try {
-        const url = new URL(req.url ?? '/', 'http://localhost')
-        const path = url.pathname.replace(/^\/tool-manager\/api/, '') || '/'
-        const method = String(req.method ?? 'GET').toUpperCase()
+  // ② GUI 用的同源 HTTP API：等 webServer 就绪再挂路由。
+  whenService(['webServer'], (webCtx) => {
+    const webServer = webCtx.get?.('webServer')
+    if (!webServer) {
+      logger?.info?.('[tool-manager] webServer 服务不可用,跳过 API 注册')
+      return
+    }
+    webCtx.effect(() => webServer.register({
+      kind: 'prefix',
+      path: '/tool-manager/api',
+      handler: async (req: any, res: any) => {
+        try {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const reqPath = url.pathname.replace(/^\/tool-manager\/api/, '') || '/'
+          const method = String(req.method ?? 'GET').toUpperCase()
 
-        if (method === 'GET' && path === '/tools') {
-          const contexts = await listContexts(ctx)
-          return json(res, 200, { ok: true, tools: listTools(ctx), config: readConfig(), contexts })
-        }
-        if (method === 'GET' && path === '/config') {
-          return json(res, 200, { ok: true, config: readConfig() })
-        }
-        if (method === 'POST' && path === '/config') {
-          const body = JSON.parse(await readBody(req))
-          const next: Config = {
-            denyPrefixes: Array.isArray(body?.denyPrefixes) ? body.denyPrefixes : [],
-            denyNames: Array.isArray(body?.denyNames) ? body.denyNames : [],
-            allowPrefixes: Array.isArray(body?.allowPrefixes) ? body.allowPrefixes : [],
-            allowNames: Array.isArray(body?.allowNames) ? body.allowNames : [],
-            denyContexts: Array.isArray(body?.denyContexts) ? body.denyContexts : [],
-            allowContexts: Array.isArray(body?.allowContexts) ? body.allowContexts : [],
-            newDefault: {
-              context: lockOf(body?.newDefault?.context),
-              third: lockOf(body?.newDefault?.third),
-              mcp: lockOf(body?.newDefault?.mcp),
-            },
-            configs: Array.isArray(body?.configs) ? body.configs : [],
+          if (method === 'GET' && reqPath === '/tools') {
+            const contexts = await listContexts(ctx)
+            return json(res, 200, { ok: true, tools: listTools(ctx), config: readConfig(), contexts })
           }
-          const ok = writeConfig(next)
-          return json(res, ok ? 200 : 500, { ok, config: ok ? next : readConfig() })
+          if (method === 'GET' && reqPath === '/config') {
+            return json(res, 200, { ok: true, config: readConfig() })
+          }
+          if (method === 'POST' && reqPath === '/config') {
+            const body = JSON.parse(await readBody(req))
+            const next: Config = {
+              denyPrefixes: Array.isArray(body?.denyPrefixes) ? body.denyPrefixes : [],
+              denyNames: Array.isArray(body?.denyNames) ? body.denyNames : [],
+              allowPrefixes: Array.isArray(body?.allowPrefixes) ? body.allowPrefixes : [],
+              allowNames: Array.isArray(body?.allowNames) ? body.allowNames : [],
+              denyContexts: Array.isArray(body?.denyContexts) ? body.denyContexts : [],
+              allowContexts: Array.isArray(body?.allowContexts) ? body.allowContexts : [],
+              newDefault: {
+                context: lockOf(body?.newDefault?.context),
+                third: lockOf(body?.newDefault?.third),
+                mcp: lockOf(body?.newDefault?.mcp),
+              },
+              configs: Array.isArray(body?.configs) ? body.configs : [],
+            }
+            const ok = writeConfig(next)
+            return json(res, ok ? 200 : 500, { ok, config: ok ? next : readConfig() })
+          }
+          return json(res, 404, { ok: false, error: 'not found: ' + reqPath })
+        } catch (e) {
+          return json(res, 500, { ok: false, error: String(e instanceof Error ? e.message : e) })
         }
-        return json(res, 404, { ok: false, error: 'not found: ' + path })
-      } catch (e) {
-        return json(res, 500, { ok: false, error: String(e instanceof Error ? e.message : e) })
-      }
-    },
-  }), 'tool-manager: api')
-
-  logger?.info?.('[tool-manager] API: /tool-manager/api (tools|config)')
+      },
+    }), 'tool-manager: api')
+    logger?.info?.('[tool-manager] API: /tool-manager/api (tools|config)')
+  })
 }
