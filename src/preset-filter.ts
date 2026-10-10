@@ -93,7 +93,22 @@ interface GuiConfig {
   denyContexts: string[]
   allowContexts: string[]
   newDefault: { context: string; third: string; mcp: string }
+  /** 已定型项名单：不在其中的 = 新出现的项，由 newDefault 决定。 */
+  baseline: string[]
 }
+
+/**
+ * DSH 官方在「宿主装配层」注册进全局工具寄存器的工具白名单（与 host index.ts 的
+ * NATIVE_HOST_TOOLS 一致）。**其余一切全局工具都算第三方** —— 这样即使某个新插件
+ * 的工具前缀不在任何名单里，也会被「新增锁定」管住（改造前它会因为"不命中前缀"
+ * 而被默认放行，asar_* 就是这么漏掉的）。
+ */
+export const NATIVE_HOST_TOOLS = new Set([
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+  'load_workspace_dependencies',
+])
 
 interface FilterContext {
   tools?: {
@@ -147,6 +162,7 @@ function readGuiConfig(): GuiConfig {
         third: cfg?.newDefault?.third === 'disabled' ? 'disabled' : 'enabled',
         mcp: cfg?.newDefault?.mcp === 'disabled' ? 'disabled' : 'enabled',
       },
+      baseline: Array.isArray(cfg?.baseline) ? cfg.baseline : [],
     }
   } catch {
     // 配置缺失/损坏时回退默认,绝不阻断装配。
@@ -154,28 +170,34 @@ function readGuiConfig(): GuiConfig {
       denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
       denyContexts: [], allowContexts: [],
       newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+      baseline: [],
     }
   }
 }
 
 export function apply(ctx: FilterContext, rawConfig?: unknown): void {
   const config = normalizeConfig(rawConfig)
-  const { scopeId, denyPrefixes: presetDenyPrefixes, filterSections } = config
+  const { scopeId, filterSections } = config
   let gui = readGuiConfig()
 
   // 屏障 2a:全局工具层视图,动态筛选要剔除的工具名。
-  // 判定优先级(高→低,与 dsh-tool-manager 的 isEffectivelyDenied 一致):
+  // 判定优先级(高→低,与 dsh-tool-manager 的 isEffectivelyDenied 严格一致):
   //   allowNames > allowPrefixes(用户) > denyNames > denyPrefixes(用户)
-  //   > presetDenyPrefixes(默认第三方) > mcp 兜底 > 第三方兜底。
+  //   > 官方宿主工具白名单放行 > 已定型(baseline)放行 > newDefault 兜底。
+  //
+  // 关键点:「是否第三方」不再靠前缀表猜,而是「不在 NATIVE_HOST_TOOLS 白名单里
+  // 就是第三方」—— 未知前缀的新插件工具因此也会被「新增锁定」管住。
   const shouldDeny = (toolName: string): boolean => {
     if (gui.allowNames.includes(toolName)) return false
     if (gui.allowPrefixes.some((p) => toolName.startsWith(p))) return false
     if (gui.denyNames.includes(toolName)) return true
     if (gui.denyPrefixes.some((p) => toolName.startsWith(p))) return true
-    if (presetDenyPrefixes.some((p) => toolName.startsWith(p))) return true
-    if (toolName.startsWith('mcp__')) return gui.newDefault.mcp === 'disabled'
-    if (THIRD_PREFIXES.some((p) => toolName.startsWith(p))) return gui.newDefault.third === 'disabled'
-    return false
+    const isMcp = toolName.startsWith('mcp__')
+    const isThird = !NATIVE_HOST_TOOLS.has(toolName)
+    if (!isMcp && !isThird) return false
+    // 已定型项（在 baseline 里）不再受「新增」开关影响。
+    if (gui.baseline.includes(toolName)) return false
+    return isMcp ? gui.newDefault.mcp === 'disabled' : gui.newDefault.third === 'disabled'
   }
 
   // 工具是动态注册的(宿主插件开关/晚注册),deny 名单必须随 tools/change 重建,
@@ -245,9 +267,9 @@ export function apply(ctx: FilterContext, rawConfig?: unknown): void {
           result = { ...result, sections: keptSections }
         }
       }
-      // 2c:过滤动态上下文。判定优先级:
-      //   allowContexts(用户显式启用) > denyContexts(用户显式禁用)
-      //   > 新增锁定(默认 enabled=注入;disabled=不在名单的上下文默认剔除)。
+      // 2c:过滤动态上下文。判定优先级(与 contextEnabled 严格一致):
+      //   allowContexts(显式启用) > denyContexts(显式禁用)
+      //   > 已定型(baseline)放行 > 新增锁定(disabled ⇒ 未定型的新上下文默认剔除)。
       if (Array.isArray(assembled.contexts)) {
         const ndContext = gui.newDefault.context
         const keptContexts = assembled.contexts.filter((c: any) => {
@@ -255,6 +277,7 @@ export function apply(ctx: FilterContext, rawConfig?: unknown): void {
           if (typeof contextName !== 'string') return true
           if (gui.allowContexts.includes(contextName)) return true
           if (gui.denyContexts.includes(contextName)) return false
+          if (gui.baseline.includes(contextName)) return true
           if (ndContext === 'disabled') return false
           return true
         })

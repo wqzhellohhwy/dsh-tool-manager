@@ -44,13 +44,28 @@ export interface Config {
   denyContexts: string[]
   allowContexts: string[]
   newDefault: NewDefault
+  /**
+   * 已定型项名单（工具名 + 上下文名）。
+   *
+   * 「新增启用/禁用」的判定基线：**不在 baseline 里的项 = 新出现的项**，由
+   * `newDefault[cat]` 决定；已在 baseline 里的项不再受该开关影响（它们的状态
+   * 在点「新增X用」的那一刻就被固化进 allow/deny 名单了）。
+   *
+   * 空数组（旧配置 / 从未点过「新增」）= 所有项都视为新项 —— 这与改造前的
+   * 行为完全一致，因此升级不会引起状态突变。
+   */
+  baseline: string[]
   configs: SavedConfig[]
 }
+
+/** 工具来源分类（与 host classify 一致）。 */
+export type ToolCategory = 'native' | 'mcp' | 'third' | 'unknown'
 
 export const EMPTY_CONFIG: Config = {
   denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
   denyContexts: [], allowContexts: [],
   newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+  baseline: [],
   configs: [],
 }
 
@@ -74,47 +89,69 @@ export const THIRD_PREFIXES = [
   'file_mount_forget', 'mcp_connector_', 'asar_',
 ]
 
+/** 读 baseline 的防御性取值（旧配置文件里没有这个字段）。 */
+function baselineOf(cfg: Config): string[] {
+  return Array.isArray(cfg.baseline) ? cfg.baseline : []
+}
+
 /** 工具当前是否被纯净预设屏蔽(GUI 的显示口径)。 */
-export function isEffectivelyDenied(cfg: Config, name: string): boolean {
+export function isEffectivelyDenied(cfg: Config, name: string, category?: ToolCategory): boolean {
+  // ① 显式名单永远优先。「完全启用/禁用」是通过**清空该分类的显式名单 + 重置定型**
+  //    来达成全局效果的，而不是靠一个持续压制名单的开关 —— 这样点完之后个别调整照常有效。
   if (cfg.allowNames.includes(name)) return false
   if (cfg.allowPrefixes.some((p) => name.startsWith(p))) return false
   if (cfg.denyNames.includes(name)) return true
   if (cfg.denyPrefixes.some((p) => name.startsWith(p))) return true
-  if (DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p))) return true
-  if (name.startsWith('mcp__')) return cfg.newDefault.mcp === 'disabled'
-  if (THIRD_PREFIXES.some((p) => name.startsWith(p))) return cfg.newDefault.third === 'disabled'
-  return false
+
+  // ② native（host 白名单核实的官方宿主工具）不参与屏蔽。
+  const lockCat = lockCategoryOf(name, category)
+  if (lockCat === null) return false
+
+  // ③ 已定型（进过 baseline）且未列名 ⇒ 启用。这就是「新增锁定」的本意：
+  //    老项的状态在点「新增X用」时已固化进名单，不再受 newDefault 影响。
+  if (baselineOf(cfg).includes(name)) return false
+
+  // ④ 未定型 = 新出现的项 ⇒ 由「新增启用/禁用」决定。
+  return cfg.newDefault[lockCat] === 'disabled'
+}
+
+/** 名字 → 归属的锁定层。native / 未知返回 null（不参与屏蔽）。 */
+function lockCategoryOf(name: string, category?: ToolCategory): LockCat | null {
+  if (category === 'native' || category === 'unknown') return null
+  if (category === 'mcp') return 'mcp'
+  if (category === 'third') return 'third'
+  // 没有 category 信息时按名字推断（预设过滤器侧就是这条路径）。
+  if (name.startsWith('mcp__')) return 'mcp'
+  if (DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p))) return 'third'
+  if (THIRD_PREFIXES.some((p) => name.startsWith(p))) return 'third'
+  return null
 }
 
 /**
- * 该类工具「启用」时必须补写 allowNames 才能生效:它们除了 denyNames 之外
- * 还有一层兜底判定,仅把名字从 denyNames 移除不足以让它们可见。
- *   - MCP(mcp__*)            : 走 newDefault.mcp 兜底,默认禁用时无条件判禁。
- *   - 第三方前缀(THIRD_PREFIXES): 走 newDefault.third 兜底,默认禁用时无条件判禁。
- *   - 用户自定义 denyPrefixes : 前缀命中即判禁,与 denyNames 内容无关。
- * 三者统一走 allowNames(判定链中优先级最高)豁免,保证启用/禁用双向都真实生效。
+ * 该类工具「启用」时必须补写 allowNames 才能生效。
  *
- * 【2026-10-11 修复】旧实现只查 mcp__ 与 DEFAULT_THIRD_PREFIXES,漏了
- * THIRD_PREFIXES 中「不在 DEFAULT 里」的前缀(anysearch_ / asar_ / dev_mode_)
- * 以及用户自己用「屏蔽前缀(附加)」加的 denyPrefixes ⇒ 这类工具点「启用」时
- * 只从 denyNames 移除、不写 allowNames,于是被兜底判定继续屏蔽,表现为
- * 「单独启用某个工具却用不了」。现在与 isEffectivelyDenied 的兜底分支严格对齐。
+ * 判定与 isEffectivelyDenied 的兜底分支严格对齐：
+ *   - 命中用户自定义 denyPrefixes        : 前缀判禁，必须靠 allowNames 豁免；
+ *   - 未定型的新项 + newDefault[cat]=禁用 : 走第 ④ 步兜底判禁，必须靠 allowNames 豁免；
+ *   - 已定型项 / native                  : 未列名即启用，不需要补。
  */
-export function needsAllowExemption(cfg: Config, name: string): boolean {
-  return name.startsWith('mcp__')
-    || cfg.denyPrefixes.some((p) => name.startsWith(p))
-    || THIRD_PREFIXES.some((p) => name.startsWith(p))
+export function needsAllowExemption(cfg: Config, name: string, category?: ToolCategory): boolean {
+  if (cfg.denyPrefixes.some((p) => name.startsWith(p))) return true
+  const lockCat = lockCategoryOf(name, category)
+  if (lockCat === null) return false
+  if (baselineOf(cfg).includes(name)) return false
+  return cfg.newDefault[lockCat] === 'disabled'
 }
 
 /** 把单个工具设为启用/禁用,返回新 Config(双向清理 allow/deny 名单,避免残留复活)。 */
-export function applyDeny(cfg0: Config, name: string, denied: boolean): Config {
+export function applyDeny(cfg0: Config, name: string, denied: boolean, category?: ToolCategory): Config {
   const next: Config = { ...cfg0, denyNames: [...cfg0.denyNames], allowNames: [...cfg0.allowNames] }
   if (denied) {
     if (!next.denyNames.includes(name)) next.denyNames.push(name)
     next.allowNames = next.allowNames.filter((n) => n !== name)
   } else {
     next.denyNames = next.denyNames.filter((n) => n !== name)
-    if (needsAllowExemption(cfg0, name) && !next.allowNames.includes(name)) {
+    if (needsAllowExemption(cfg0, name, category) && !next.allowNames.includes(name)) {
       next.allowNames.push(name)
     }
   }
@@ -134,9 +171,86 @@ export function applyContextDeny(cfg0: Config, name: string, denied: boolean): C
   return next
 }
 
-/** 上下文是否实际启用:显式启用 > 显式禁用 > 新增锁定默认。 */
+/** 上下文是否实际启用:显式启用 > 显式禁用 > 已定型(启用) > 新增锁定默认。 */
 export function contextEnabled(cfg: Config, name: string): boolean {
   if (cfg.allowContexts.includes(name)) return true
   if (cfg.denyContexts.includes(name)) return false
+  if (baselineOf(cfg).includes(name)) return true
   return cfg.newDefault.context !== 'disabled'
+}
+
+/**
+ * 名字列表的搜索过滤（工具与上下文共用同一口径：大小写不敏感的子串匹配）。
+ * 抽成纯函数是因为上下文列表此前**完全没接搜索框**，需要在测试里钉住。
+ */
+export function filterNames(names: string[], query: string): string[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return names
+  return names.filter((n) => n.toLowerCase().includes(q))
+}
+
+// ── 「完全启用/禁用」与「新增启用/禁用」──────────────────────────────────────
+/**
+ * 「完全启用/禁用」：把某一层的**当前全部项**一次性置为启用或禁用。
+ *
+ * 实现方式是"推倒重来"而不是加压一个持续开关：
+ *   ① 清空该层的显式名单（allow + deny）—— 否则残留的 allow 会挡住"完全禁用"；
+ *   ② 把这些项从 baseline 移出 —— 它们重新变成"未定型"，于是统一吃 newDefault；
+ *   ③ 设 newDefault[cat] = 目标状态。
+ * 这样点完之后，个别工具的开关照常有最高优先级，不会出现"完全开关压在头上、
+ * 单点无效"的死结。
+ *
+ * @param allNames 该层的全部项（工具名或上下文名，由调用方按 cat 提供）。
+ */
+export function applyFullToggle(cfg: Config, cat: LockCat, state: LockState, allNames: string[]): Config {
+  const names = new Set(allNames)
+  const next: Config = {
+    ...cfg,
+    newDefault: { ...cfg.newDefault, [cat]: state },
+    baseline: baselineOf(cfg).filter((n) => !names.has(n)),
+    denyNames: [...cfg.denyNames],
+    allowNames: [...cfg.allowNames],
+    denyContexts: [...cfg.denyContexts],
+    allowContexts: [...cfg.allowContexts],
+  }
+  if (cat === 'context') {
+    next.denyContexts = next.denyContexts.filter((n) => !names.has(n))
+    next.allowContexts = next.allowContexts.filter((n) => !names.has(n))
+  } else {
+    next.denyNames = next.denyNames.filter((n) => !names.has(n))
+    next.allowNames = next.allowNames.filter((n) => !names.has(n))
+  }
+  return next
+}
+
+/**
+ * 「新增启用/禁用」：只决定**今后新出现**的工具/上下文的默认状态，现有项保持现状。
+ *
+ * 两步：
+ *   ① **固化**：按**改动前**的配置判定每个现有项的实际状态，把其中"禁用"的写进
+ *      deny 名单 —— 否则它们被并入 baseline 后会翻成"未列名 ⇒ 启用"，状态突变；
+ *   ② **定型**：把现有项全部并入 baseline，使它们从此不再受 newDefault 影响。
+ * 之后 newDefault 只对 baseline 之外的新项生效。
+ *
+ * @param allNames 该层的全部项。
+ * @param isDenied 用**改动前**的 cfg 判定某个名字当前是否被屏蔽。
+ */
+export function applyNewDefault(
+  cfg: Config,
+  cat: LockCat,
+  state: LockState,
+  allNames: string[],
+  isDenied: (name: string) => boolean,
+): Config {
+  const frozen = allNames.filter((n) => isDenied(n))
+  const baseline = [...new Set([...baselineOf(cfg), ...allNames])]
+  const next: Config = { ...cfg, baseline, newDefault: { ...cfg.newDefault, [cat]: state } }
+  if (cat === 'context') {
+    next.denyContexts = [...new Set([...cfg.denyContexts, ...frozen])]
+    next.allowContexts = cfg.allowContexts.filter((n) => !frozen.includes(n))
+  } else {
+    next.denyNames = [...new Set([...cfg.denyNames, ...frozen])]
+    next.allowNames = cfg.allowNames.filter((n) => !frozen.includes(n))
+  }
+  return next
 }

@@ -56,10 +56,14 @@ const definition = buildCleanAgentPreset({ order: 60 })
 - **按来源分组的工具清单**：`mcp`（按 MCP server 名分组）/ `third`（按归属插件分组）/ `native`（**经源码核实的 DSH 官方宿主工具白名单**，见下文）/ `unknown`，带搜索与"仅看已启用/已禁用"筛选。
 - **两个独立控件**：每个工具一个「☑ 选中」（供批量操作）+ 一个「启用/禁用」开关（单个即时生效）。
 - **批量操作**：全选（作用于当前筛选结果）/ 启用选中 / 禁用选中；另有「选中并禁用所有 MCP」「选中并禁用所有第三方」两个一键动作。**禁用只写净化名单，不会真的关掉 MCP 或卸载插件。**
-- **动态上下文治理**：枚举 `systemPrompt.assemble()` 暴露的动态上下文，用 `allowContexts`（显式启用）/ `denyContexts`（显式禁用）双向开关，未列名者由「新增锁定」`newDefault.context` 决定默认启用还是默认屏蔽。
+- **动态上下文治理**：枚举 `systemPrompt.assemble()` 暴露的动态上下文，用 `allowContexts`（显式启用）/ `denyContexts`（显式禁用）双向开关；**搜索框对上下文同样生效**（此前只筛工具）。
   ⚠️ **前提**：目标预设的 persona **不能**配置 `includeRuntimeContext: false`——那会调用 `suppressRuntimeContext()` 把该作用域的全部上下文整体抹除，本页的开关将完全无效（详见「开发须知」第 8 条）。
-- **新增锁定策略**：上下文 / 第三方 / MCP 三层各自设置「新增启用 / 新增禁用」——之后新出现的上下文注入、第三方工具、MCP 工具自动按策略处理（默认"新增启用"，与前行为一致）。
-- **命名配置**：把当前六个名单存成命名配置，可启用 / 重命名 / 删除；`newDefault`（新增锁定）**不随配置切换**，避免切配置时把"新增策略"也换掉。
+- **每层三个动作**（上下文 / 第三方 / MCP 各一行）：
+  - **一键启用 / 一键禁用**：对当前枚举到的项逐个设置状态（尊重显式名单）；
+  - **完全启用 / 完全禁用**：清空该层**所有**个别设置（含显式名单与定型状态），当前全部项统一启用或禁用；点完之后逐项开关照常有最高优先级，不会出现"完全开关压在头上、单点无效"的死结；
+  - **新增启用 / 新增禁用**：只决定**今后新出现**的项默认是什么状态——新插件带出来的工具、新开的 MCP server、新出现的上下文。点它的那一刻会把现有项按当前状态**定型**（判禁的固化进 `denyNames`），因此已有工具的状态不会突变。判据是 `baseline`（已定型名单）：不在其中的就是"新项"。
+- **第三方判定的兜底是「非白名单即第三方」**：不再靠前缀表猜。未知前缀的新插件工具也会被「新增锁定」管住（改造前它因为"不命中任何前缀"而被默认放行 —— `asar_*` 当年就是这么漏掉的）。
+- **命名配置**：把当前六个名单存成命名配置，可启用 / 重命名 / 删除；`newDefault`（新增策略）与 `baseline` **不随配置切换**，避免切配置时把"新增策略"也换掉。
 - **非破坏**：插件只负责"枚举 + 写配置 + 画界面"；过滤发生在预设侧，插件本身不碰任何工具的实际注册。
 
 ## 技术栈
@@ -205,16 +209,31 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
   "allowNames": [],        // 豁免：精确工具名
   "denyContexts": [],      // 禁用的动态上下文
   "allowContexts": [],     // 显式启用的动态上下文
-  "newDefault": {          // 三层「新增锁定」：新出现的内容默认启用/禁用
+  "newDefault": {          // 「新增启用/禁用」：不在 baseline 里的"新项"默认启用/禁用
     "context": "enabled",
     "third": "enabled",
     "mcp": "enabled"
   },
+  "baseline": [],          // 已定型项（工具名 + 上下文名）：点「新增X用」时写入
   "configs": []            // 命名配置：{ name, state: { 上面六个名单 } }
 }
 ```
 
-优先级：`allow*` > `deny*`；`newDefault` 只影响"新出现"的条目，且不随命名配置切换。
+**判定优先级**（GUI 显示与预设过滤器逐条一致）：
+
+```
+allowNames / allowPrefixes        → 启用
+denyNames / denyPrefixes          → 禁用
+native（官方宿主工具白名单）        → 启用（不参与屏蔽）
+在 baseline 里且未列名             → 启用
+其余（= 新出现的项）               → newDefault[cat]
+```
+
+三个要点：
+
+- **`baseline` 为空 = 所有非 native 项都算新项**，行为与改造前一致 —— 所以升级不会引起状态突变；一旦点过「新增X用」，现有项被定型并（判禁的）固化进 `denyNames`，此后只有真正新增的项吃 `newDefault`。
+- **`newDefault` 与 `baseline` 都不随命名配置切换**（它们是"策略"而不是"名单"）。
+- **「完全启用/禁用」不写进配置状态**：它是一次性动作（清该层名单 + 把该层从 baseline 移出 + 设 `newDefault`），所以点完之后配置里看不到"完全"这个状态，但效果是全局的。
 
 ## HTTP API（同源，挂在 dsh webserver 上）
 
@@ -222,7 +241,7 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
 |---|---|---|
 | `GET` | `/tool-manager/api/tools` | 枚举当前寄存器中的全部工具（含 `category` 与 `group`） |
 | `GET` | `/tool-manager/api/config` | 读当前配置 |
-| `POST` | `/tool-manager/api/config` | 保存配置（六个名单 + `newDefault` + `configs`） |
+| `POST` | `/tool-manager/api/config` | 保存配置（六个名单 + `newDefault` + `baseline` + `configs`） |
 
 工具来源分类（`category`）：`mcp`（`mcp__*`）· `native`（**官方宿主工具白名单**，当前为 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` / `load_workspace_dependencies`）· `third`（宿主层第三方插件注册，**未命中白名单者一律归此类**）· `unknown`（预留）。
 
@@ -249,7 +268,8 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
 | 设置里**找不到**「预设工具管理」 | 插件没装配（`bundles` 里没列 / 没建链接 / `lib/` 未构建）；重启 DSH 后看插件列表 |
 | 页面**空白** | section 组件不是 React 组件（见"开发须知"第 1 条） |
 | 关了工具但纯净会话里**还在** | 改动只对新会话生效；另外确认内置 `clean-agent` 预设已注册成功（日志里找 `[tool-manager] 已注册内置预设 clean-agent`，或看 `broken` 告警） |
-| 新装的 MCP 工具自动出现在纯净会话 | 把「新增锁定 → MCP」设为"新增禁用"，或手动勾选禁用 |
+| 新装的 MCP 工具自动出现在纯净会话 | 点「MCP → 新增禁用」把它定型为"新增即屏蔽"（现有 MCP 工具状态不变），或手动勾选禁用 |
+| 搜索框搜不到「上下文注入」里的条目 | 已修（2026-10-11）：此前搜索只筛工具列表，现在上下文同样按名字过滤 |
 | 上下文明明**勾了启用**，纯净会话里却没有 | 预设 persona 配了 `includeRuntimeContext: false`（见"开发须知"第 8 条）——persona 的整体抹除优先于按名开关 |
 | 单独点「启用」某个工具，纯净会话里**还是用不了** | `needsAllowExemption` 的覆盖范围与判定链不同步（见"开发须知"第 7 条） |
 | 某个第三方工具被显示成「DSH 官方宿主工具」 | 该名字不在 `NATIVE_HOST_TOOLS` 白名单里才可能发生；新插件的工具默认归 `third`，若显示成 native 说明 host 侧 `classify()` 未更新（`npm test` 里的 `classify.test.mjs` 会拦住） |

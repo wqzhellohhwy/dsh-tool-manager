@@ -23,11 +23,15 @@ import {
   EMPTY_CONFIG,
   applyContextDeny,
   applyDeny,
+  applyFullToggle,
+  applyNewDefault,
   contextEnabled,
+  filterNames,
   isEffectivelyDenied,
   type Config,
   type LockState,
   type SavedConfig,
+  type ToolCategory,
 } from './decide'
 
 type ClientContext = {
@@ -186,13 +190,21 @@ function ToolManagerSection(): ReactElement {
     persist(next)
   }
 
+  /** 名字 → 工具分类（用于判定与「启用需补 allowNames」）。上下文不属于任何工具分类。 */
+  const toolCategoryMap = useMemo(() => {
+    const m = new Map<string, ToolCategory>()
+    for (const t of tools) m.set(t.name, t.category)
+    return m
+  }, [tools])
+  const toolCatOf = (name: string): ToolCategory | undefined => toolCategoryMap.get(name)
+
   const toggle = (name: string, denied: boolean): void => {
-    commit(applyDeny(cfg, name, denied))
+    commit(applyDeny(cfg, name, denied, toolCatOf(name)))
   }
 
   const batchSetDenied = (names: string[], denied: boolean): void => {
     if (names.length === 0) return
-    commit(names.reduce((acc, n) => applyDeny(acc, n, denied), cfg))
+    commit(names.reduce((acc, n) => applyDeny(acc, n, denied, toolCatOf(n)), cfg))
   }
 
   const toggleSelect = (name: string): void => {
@@ -206,13 +218,13 @@ function ToolManagerSection(): ReactElement {
 
   const reset = (): void => {
     setSelected(new Set())
-    commit({ ...EMPTY_CONFIG, newDefault: cfg.newDefault, configs: cfg.configs })
+    commit({ ...EMPTY_CONFIG, newDefault: cfg.newDefault, baseline: cfg.baseline, configs: cfg.configs })
   }
 
   const matches = (t: ToolRow): boolean => {
     const q = query.trim().toLowerCase()
     if (q && !t.name.toLowerCase().includes(q) && !(t.description ?? '').toLowerCase().includes(q)) return false
-    const d = isEffectivelyDenied(cfg, t.name)
+    const d = isEffectivelyDenied(cfg, t.name, t.category)
     if (filter === 'enabled' && d) return false
     if (filter === 'denied' && !d) return false
     return true
@@ -252,11 +264,17 @@ function ToolManagerSection(): ReactElement {
 
   const contextSet = useMemo(() => new Set(contextNames), [contextNames])
 
+  /**
+   * 搜索框对「上下文注入」同样生效（此前只过滤工具列表，搜任何词上下文都纹丝不动）。
+   * 匹配口径与工具一致：名字的子串匹配（上下文没有描述字段）。
+   */
+  const filteredContexts = useMemo(() => filterNames(contextNames, query), [contextNames, query])
+
   const selectableTools = useMemo(() => filteredTools.filter((t) => t.category !== 'native'), [filteredTools])
 
   const selectAllNames = useMemo(
-    () => [...selectableTools.map((t) => t.name), ...contextNames],
-    [selectableTools, contextNames],
+    () => [...selectableTools.map((t) => t.name), ...filteredContexts],
+    [selectableTools, filteredContexts],
   )
 
   const allSelectableSelected = selectAllNames.length > 0 && selectAllNames.every((n) => selected.has(n))
@@ -281,9 +299,9 @@ function ToolManagerSection(): ReactElement {
 
   const selectAllContexts = (): void => {
     setSelected((prev) => {
-      const allSel = contextNames.length > 0 && contextNames.every((n) => prev.has(n))
+      const allSel = filteredContexts.length > 0 && filteredContexts.every((n) => prev.has(n))
       const next = new Set(prev)
-      for (const n of contextNames) {
+      for (const n of filteredContexts) {
         if (allSel) next.delete(n)
         else next.add(n)
       }
@@ -299,10 +317,34 @@ function ToolManagerSection(): ReactElement {
     commit({ ...cfg, denyContexts: [...contextNames], allowContexts: [] })
   }
 
-  /** 切换某层的「新增锁定」:enabled=新出现的内容默认可用,disabled=默认屏蔽。 */
-  const toggleNewDefault = (cat: LockCat): void => {
-    const next: LockState = cfg.newDefault[cat] === 'enabled' ? 'disabled' : 'enabled'
-    commit({ ...cfg, newDefault: { ...cfg.newDefault, [cat]: next } })
+  /** 某一层当前枚举到的全部项（工具按 host 给的 category，上下文按名字列表）。 */
+  const categoryNames = (cat: LockCat): string[] =>
+    cat === 'context'
+      ? contextNames
+      : tools.filter((t) => t.category === cat).map((t) => t.name)
+
+  /**
+   * 「完全启用/禁用」：把该层**全部**项一次性置为启用/禁用。
+   * 做法是清空该层的显式名单 + 让这些项重新"未定型"，再设 newDefault —— 详见
+   * decide.ts 的 applyFullToggle。点完之后个别开关照常有效（不会被压住）。
+   */
+  const fullToggle = (cat: LockCat, state: LockState): void => {
+    const names = categoryNames(cat)
+    if (names.length === 0) return
+    commit(applyFullToggle(cfg, cat, state, names))
+  }
+
+  /**
+   * 「新增启用/禁用」：只决定**今后新出现**的工具/上下文默认是什么状态。
+   * 现有项先按当前配置把状态固化进名单、再并入 baseline，因此状态不会突变；
+   * 之后只有 baseline 之外的新项才吃这个开关。
+   */
+  const newDefaultToggle = (cat: LockCat, state: LockState): void => {
+    const names = categoryNames(cat)
+    const isDenied = cat === 'context'
+      ? (n: string) => !contextEnabled(cfg, n)
+      : (n: string) => isEffectivelyDenied(cfg, n, toolCatOf(n))
+    commit(applyNewDefault(cfg, cat, state, names, isDenied))
   }
 
   // ── 命名配置(保存/启用/重命名/删除) ─────────────────────────────
@@ -547,9 +589,24 @@ function ToolManagerSection(): ReactElement {
               <button className="tm-btn tm-mini tm-success" onClick={enableAllContexts}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={disableAllContexts}>一键禁用</button>
               <button
+                className="tm-btn tm-mini tm-success"
+                onClick={() => fullToggle('context', 'enabled')}
+                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部上下文注入一律启用"
+              >
+                完全启用
+              </button>
+              <button
+                className="tm-btn tm-mini tm-danger"
+                onClick={() => fullToggle('context', 'disabled')}
+                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部上下文注入一律禁用"
+              >
+                完全禁用
+              </button>
+              <button
                 className={'tm-lock' + (cfg.newDefault.context === 'disabled' ? ' off' : '')}
-                onClick={() => toggleNewDefault('context')}
-                title={'新增锁定：新出现的上下文注入默认' + (cfg.newDefault.context === 'enabled' ? '启用' : '禁用')}
+                onClick={() => newDefaultToggle('context', cfg.newDefault.context === 'enabled' ? 'disabled' : 'enabled')}
+                title={'新增锁定：今后「新出现」的上下文默认' + (cfg.newDefault.context === 'enabled' ? '启用' : '禁用')
+                  + '（现有项会先按当前状态定型，不受影响）'}
               >
                 {LOCK_ICON[cfg.newDefault.context]} 新增{cfg.newDefault.context === 'enabled' ? '启用' : '禁用'}
               </button>
@@ -560,9 +617,24 @@ function ToolManagerSection(): ReactElement {
               <button className="tm-btn tm-mini tm-success" onClick={() => enableCategory('third')}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={() => disableCategory('third')}>一键禁用</button>
               <button
+                className="tm-btn tm-mini tm-success"
+                onClick={() => fullToggle('third', 'enabled')}
+                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部第三方工具一律启用"
+              >
+                完全启用
+              </button>
+              <button
+                className="tm-btn tm-mini tm-danger"
+                onClick={() => fullToggle('third', 'disabled')}
+                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部第三方工具一律禁用"
+              >
+                完全禁用
+              </button>
+              <button
                 className={'tm-lock' + (cfg.newDefault.third === 'disabled' ? ' off' : '')}
-                onClick={() => toggleNewDefault('third')}
-                title={'新增锁定：新出现的第三方插件工具默认' + (cfg.newDefault.third === 'enabled' ? '启用' : '禁用')}
+                onClick={() => newDefaultToggle('third', cfg.newDefault.third === 'enabled' ? 'disabled' : 'enabled')}
+                title={'新增锁定：今后「新插件带出来的」第三方工具默认' + (cfg.newDefault.third === 'enabled' ? '启用' : '禁用')
+                  + '（现有项会先按当前状态定型，不受影响）'}
               >
                 {LOCK_ICON[cfg.newDefault.third]} 新增{cfg.newDefault.third === 'enabled' ? '启用' : '禁用'}
               </button>
@@ -573,9 +645,24 @@ function ToolManagerSection(): ReactElement {
               <button className="tm-btn tm-mini tm-success" onClick={() => enableCategory('mcp')}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={() => disableCategory('mcp')}>一键禁用</button>
               <button
+                className="tm-btn tm-mini tm-success"
+                onClick={() => fullToggle('mcp', 'enabled')}
+                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部 MCP 工具一律启用"
+              >
+                完全启用
+              </button>
+              <button
+                className="tm-btn tm-mini tm-danger"
+                onClick={() => fullToggle('mcp', 'disabled')}
+                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部 MCP 工具一律禁用"
+              >
+                完全禁用
+              </button>
+              <button
                 className={'tm-lock' + (cfg.newDefault.mcp === 'disabled' ? ' off' : '')}
-                onClick={() => toggleNewDefault('mcp')}
-                title={'新增锁定：新出现的 MCP 工具默认' + (cfg.newDefault.mcp === 'enabled' ? '启用' : '禁用')}
+                onClick={() => newDefaultToggle('mcp', cfg.newDefault.mcp === 'enabled' ? 'disabled' : 'enabled')}
+                title={'新增锁定：今后「新开的 MCP server」带出来的工具默认' + (cfg.newDefault.mcp === 'enabled' ? '启用' : '禁用')
+                  + '（现有项会先按当前状态定型，不受影响）'}
               >
                 {LOCK_ICON[cfg.newDefault.mcp]} 新增{cfg.newDefault.mcp === 'enabled' ? '启用' : '禁用'}
               </button>
@@ -587,13 +674,14 @@ function ToolManagerSection(): ReactElement {
             <PrefixInput cfg={cfg} commit={commit} />
           </div>
 
-          {contextNames.length > 0 ? (
+          {filteredContexts.length > 0 ? (
             <div className="tm-group">
               <h4>上下文注入（动态上下文）</h4>
               <div className="tm-subgroup">
                 <div className="tm-subhead">
                   <span className="tm-subtitle">
-                    共 {contextNames.length} 项
+                    共 {filteredContexts.length} 项
+                    {filteredContexts.length !== contextNames.length ? `（已筛出 / 全部 ${contextNames.length}）` : ''}
                     <span className="tm-subcount"></span>
                   </span>
                   <div className="tm-group-actions">
@@ -603,7 +691,7 @@ function ToolManagerSection(): ReactElement {
                   </div>
                 </div>
                 <div className="tm-tools">
-                  {contextNames.map((name) => {
+                  {filteredContexts.map((name) => {
                     const enabled = contextEnabled(cfg, name)
                     const sel = selected.has(name)
                     return (
@@ -722,7 +810,10 @@ function ToolManagerSection(): ReactElement {
             ) : null}
           </div>
           <div className="tm-hint">
-            提示：启用/禁用即时自动保存；工具通过前缀/精确名 deny 名单生效，「上下文注入」通过 denyContexts 名单禁用（默认全启用）。所有操作只写纯净预设配置，不关闭 MCP/插件服务本身。修改后请新建 clean-agent 会话验证。
+            提示：启用/禁用即时自动保存，<b>下一轮请求即生效</b>（无需新建会话）。
+            「完全启用/禁用」= 清空该层所有个别设置（含定型状态），当前全部项统一启用或禁用，之后逐项调整照常有效。
+            「新增启用/禁用」= 只决定<b>今后新出现</b>的项（新插件带出的工具、新开的 MCP server、新出现的上下文）默认是什么状态；点它的那一刻会把现有项按当前状态定型，因此不会影响已有工具。
+            所有操作只写纯净预设配置，不关闭 MCP/插件服务本身。
             配置文件：$DSH_HOME/.dsh/tool-manager.json
           </div>
         </>

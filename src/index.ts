@@ -108,6 +108,8 @@ interface Config {
   denyContexts: string[]
   allowContexts: string[]
   newDefault: NewDefault
+  /** 已定型项名单（「新增启用/禁用」的判定基线，详见 client/decide.ts）。 */
+  baseline: string[]
   configs: SavedConfig[]
 }
 
@@ -115,6 +117,7 @@ const EMPTY: Config = {
   denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
   denyContexts: [], allowContexts: [],
   newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+  baseline: [],
   configs: [],
 }
 
@@ -139,6 +142,7 @@ function readConfig(): Config {
         third: lockOf(cfg?.newDefault?.third),
         mcp: lockOf(cfg?.newDefault?.mcp),
       },
+      baseline: Array.isArray(cfg?.baseline) ? cfg.baseline : [],
       configs: Array.isArray(cfg?.configs) ? cfg.configs : [],
     }
   } catch {
@@ -363,6 +367,7 @@ export function apply(ctx: AppContext): void {
                 third: lockOf(body?.newDefault?.third),
                 mcp: lockOf(body?.newDefault?.mcp),
               },
+              baseline: Array.isArray(body?.baseline) ? body.baseline : [],
               configs: Array.isArray(body?.configs) ? body.configs : [],
             }
             const ok = writeConfig(next)
