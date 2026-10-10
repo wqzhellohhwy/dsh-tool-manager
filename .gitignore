@@ -3,3 +3,4 @@ lib/
 lib.bak-*/
 *.log
 *.bak-*
+backups-*/

@@ -35,4 +35,22 @@ const clientBundle: UserConfig = {
   },
 }
 
-export default [clientBundle] satisfies UserConfig[]
+/**
+ * 测试用入口:把判定纯逻辑打成 lib/decide.mjs,供 tests/decide.test.mjs
+ * (node --test)直接 import —— 避免测试去解析 React 组件里未被导出的闭包函数。
+ */
+const decideBundle: UserConfig = {
+  entry: { decide: 'src/client/decide.ts' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  outputOptions: {
+    entryFileNames: 'decide.mjs',
+    codeSplitting: false,
+  },
+}
+
+export default [clientBundle, decideBundle] satisfies UserConfig[]

@@ -8,7 +8,7 @@
 
 ## 项目背景
 
-DeepSeek Harness 是高度插件化的宿主：宿主层（HOST 组合）会注册大量**全局工具**与**运行时上下文**，而 [dsh-clean-agent-preset](https://github.com/wqzhellohhwy/dsh-clean-agent-preset) 这类"纯净预设"的目标是把它们挡在某个会话之外——只留系统提示词、技能、MCP 与 dsh 原生工具。
+DeepSeek Harness 是高度插件化的宿主：宿主层（HOST 组合）会注册大量**全局工具**与**运行时上下文**，而"纯净预设"（如 `clean-agent`，其过滤器 `clean-tool-filter.mjs` 由本插件配套维护）的目标是把它们挡在某个会话之外——只留系统提示词、技能、MCP 与 dsh 原生工具。
 
 预设侧的 `clean-tool-filter.mjs` 用 `tools.restrict({ deny })` 做屏蔽，但它只是一个**静态名单 + 命名规律**：
 
@@ -20,10 +20,11 @@ DeepSeek Harness 是高度插件化的宿主：宿主层（HOST 组合）会注�
 
 ## 核心功能
 
-- **按来源分组的工具清单**：`mcp`（按 MCP server 名分组）/ `third`（按归属插件分组）/ `native`（预设装配的原生工具）/ `unknown`，带搜索与"仅看已启用/已禁用"筛选。
+- **按来源分组的工具清单**：`mcp`（按 MCP server 名分组）/ `third`（按归属插件分组）/ `native`（**经源码核实的 DSH 官方宿主工具白名单**，见下文）/ `unknown`，带搜索与"仅看已启用/已禁用"筛选。
 - **两个独立控件**：每个工具一个「☑ 选中」（供批量操作）+ 一个「启用/禁用」开关（单个即时生效）。
 - **批量操作**：全选（作用于当前筛选结果）/ 启用选中 / 禁用选中；另有「选中并禁用所有 MCP」「选中并禁用所有第三方」两个一键动作。**禁用只写净化名单，不会真的关掉 MCP 或卸载插件。**
-- **动态上下文治理**：枚举 `systemPrompt.assemble()` 暴露的动态上下文，采用 **`denyContexts` 禁用制 + `allowContexts` 显式启用**（默认全开，只关你点掉的）。
+- **动态上下文治理**：枚举 `systemPrompt.assemble()` 暴露的动态上下文，用 `allowContexts`（显式启用）/ `denyContexts`（显式禁用）双向开关，未列名者由「新增锁定」`newDefault.context` 决定默认启用还是默认屏蔽。
+  ⚠️ **前提**：目标预设的 persona **不能**配置 `includeRuntimeContext: false`——那会调用 `suppressRuntimeContext()` 把该作用域的全部上下文整体抹除，本页的开关将完全无效（详见「开发须知」第 8 条）。
 - **新增锁定策略**：上下文 / 第三方 / MCP 三层各自设置「新增启用 / 新增禁用」——之后新出现的上下文注入、第三方工具、MCP 工具自动按策略处理（默认"新增启用"，与前行为一致）。
 - **命名配置**：把当前六个名单存成命名配置，可启用 / 重命名 / 删除；`newDefault`（新增锁定）**不随配置切换**，避免切配置时把"新增策略"也换掉。
 - **非破坏**：插件只负责"枚举 + 写配置 + 画界面"；过滤发生在预设侧，插件本身不碰任何工具的实际注册。
@@ -183,7 +184,10 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
 | `GET` | `/tool-manager/api/config` | 读当前配置 |
 | `POST` | `/tool-manager/api/config` | 保存配置（六个名单 + `newDefault` + `configs`） |
 
-工具来源分类（`category`）：`mcp`（`mcp__*`）· `native`（预设装配的原生工具）· `third`（宿主层第三方插件注册）· `unknown`。
+工具来源分类（`category`）：`mcp`（`mcp__*`）· `native`（**官方宿主工具白名单**，当前为 `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` / `load_workspace_dependencies`）· `third`（宿主层第三方插件注册，**未命中白名单者一律归此类**）· `unknown`（预留）。
+
+> `native` 采用**白名单 + 兜底归 third**（2026-10-11 修正）。旧实现是"硬编码第三方前缀 + 兜底归 native"，任何没被列举的新插件工具都会显示成「原生 / 默认启用」，而纯净预设本该屏蔽它——分类错误的方向恰好是漏屏蔽。
+> 另注：DSH 的原生工具（read/write/pwsh/glob…）由 agent preset 在**会话作用域**注册，不进入全局寄存器，因此本页整体看不到它们。
 
 ## 开发须知（踩过的坑）
 
@@ -192,6 +196,10 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
 3. **重命名插件**时，若宿主别处按名字引用它（例如工具归属映射表），要一并改：本仓库的 `src/index.ts` 里有一张"工具前缀 → 归属插件名"的映射表（`memory`、`dtodo`、`skill_manage`、`de_` → `dsh-memory-evolve-mod`），改插件名时记得同步。
 4. **改动只对新会话生效**：过滤发生在预设装配期。
 5. `lib/` 是产物目录且被 git 忽略 —— 克隆后先构建，否则 profile 装配会报"找不到入口"。
+6. **判定逻辑只有一个真值来源**：工具/上下文的启停判定（`isEffectivelyDenied` / `needsAllowExemption` / `applyDeny` / `applyContextDeny` / `contextEnabled`）都在 `src/client/decide.ts`，且前缀表必须与 `clean-tool-filter.mjs` 的常量逐字一致——`tests/decide.test.mjs` 里有一条一致性断言守着。改名单时三处（filter / host / decide）要同时改。
+7. **「启用」必须真的能启用**：`needsAllowExemption()` 的判定范围必须覆盖判定链里所有"兜底分支"（`mcp__`、`THIRD_PREFIXES`、自定义 `denyPrefixes`），否则点「启用」只从 `denyNames` 移除、不写 `allowNames`，工具会被兜底继续屏蔽——表现为"单独启用某个工具却用不了"（2026-10-11 已修，见 `tests/decide.test.mjs` 的回归与对照组）。
+8. **上下文开关会被 persona 架空**：若目标预设的 persona 配了 `includeRuntimeContext: false`，persona 会调用 `ctx.systemPrompt.suppressRuntimeContext()`，官方语义是"**该作用域内的 context provider 一律不求值、装配监听器加进来的上下文被丢弃**"。此时本插件写多少 `allowContexts` 都没用（2c 拿到的永远是空数组）。要按名字治理上下文，必须把预设的 persona 设为 `includeRuntimeContext: true`，让 `clean-tool-filter` 的 2c 成为唯一的上下文屏障。
+9. **`tools.restrict()` 要求 agent 作用域**：在 DSH 0.2.1-alpha.1 上于非 agent 作用域调用会抛 `tools.restrict() requires a scoped context (agent.ctx)`。预设 standing scope 内可用，顶层装配不可用。
 
 ## 常见问题
 
@@ -202,6 +210,9 @@ bash scripts/build.sh          # = node scripts/build-host.mjs + npm run build:c
 | 页面**空白** | section 组件不是 React 组件（见"开发须知"第 1 条） |
 | 关了工具但纯净会话里**还在** | 改动只对新会话生效；另外确认预设侧 `clean-tool-filter.mjs` 已装配并读同一份 `tool-manager.json` |
 | 新装的 MCP 工具自动出现在纯净会话 | 把「新增锁定 → MCP」设为"新增禁用"，或手动勾选禁用 |
+| 上下文明明**勾了启用**，纯净会话里却没有 | 预设 persona 配了 `includeRuntimeContext: false`（见"开发须知"第 8 条）——persona 的整体抹除优先于按名开关 |
+| 单独点「启用」某个工具，纯净会话里**还是用不了** | `needsAllowExemption` 的覆盖范围与判定链不同步（见"开发须知"第 7 条） |
+| 某个第三方工具被显示成「DSH 官方宿主工具」 | 该名字不在 `NATIVE_HOST_TOOLS` 白名单里才可能发生；新插件的工具默认归 `third`，若显示成 native 说明 host 侧 `classify()` 未更新（`npm test` 里的 `classify.test.mjs` 会拦住） |
 
 ## License
 

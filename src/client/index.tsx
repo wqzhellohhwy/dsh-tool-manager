@@ -19,6 +19,16 @@
  */
 import { Fragment, useEffect, useMemo, useState, type ReactElement, type ChangeEvent, type KeyboardEvent } from 'react'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
+import {
+  EMPTY_CONFIG,
+  applyContextDeny,
+  applyDeny,
+  contextEnabled,
+  isEffectivelyDenied,
+  type Config,
+  type LockState,
+  type SavedConfig,
+} from './decide'
 
 type ClientContext = {
   slots: SlotsService
@@ -35,68 +45,13 @@ interface ToolRow {
   group: string
 }
 
-interface Config {
-  denyPrefixes: string[]
-  denyNames: string[]
-  allowPrefixes: string[]
-  allowNames: string[]
-  denyContexts: string[]
-  allowContexts: string[]
-  newDefault: NewDefault
-  configs: SavedConfig[]
-}
-
-type LockState = 'enabled' | 'disabled'
 type LockCat = 'context' | 'third' | 'mcp'
-
-interface NewDefault {
-  context: LockState
-  third: LockState
-  mcp: LockState
-}
-
-/** 保存的命名配置(不含 newDefault——「新增锁定」状态不随配置保存/切换)。 */
-interface SavedConfig {
-  id: string
-  name: string
-  savedAt: string
-  state: {
-    denyPrefixes: string[]
-    denyNames: string[]
-    allowPrefixes: string[]
-    allowNames: string[]
-    denyContexts: string[]
-    allowContexts: string[]
-  }
-}
-
-const EMPTY_CONFIG: Config = {
-  denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
-  denyContexts: [], allowContexts: [],
-  newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
-  configs: [],
-}
-
-// 与 clean-tool-filter.mjs 默认名单一致(anysearch_ 已移出默认屏蔽)。
-const DEFAULT_THIRD_PREFIXES = [
-  'dev_', 'memory', 'dtodo', 'skill_manage', 'undo_', 'redteam_',
-  'ssh_', 'context_audit', 'describe_image', 'de_', 'file_mount_forget',
-  'mcp_connector_',
-]
-
-// 第三方插件工具完整前缀(与 host classify 一致,含预设名单外的 anysearch_ 等,
-// 用于「新增锁定」对名单外第三方工具的兜底判定)。
-const THIRD_PREFIXES = [
-  'dev_mode_', 'dev_', 'anysearch_', 'memory', 'dtodo', 'skill_manage',
-  'de_', 'undo_', 'context_audit', 'ssh_', 'redteam_', 'describe_image',
-  'file_mount_forget', 'mcp_connector_',
-]
 
 const LOCK_ICON: Record<LockState, string> = { enabled: '🟢', disabled: '🔴' }
 
 const CATEGORY_LABEL: Record<string, string> = {
   mcp: 'MCP 工具（默认启用）',
-  native: 'DSH 原生工具 / 纯净预设装配（默认启用）',
+  native: 'DSH 官方宿主工具（默认启用）',
   third: '宿主第三方插件工具（纯净预设默认屏蔽）',
   unknown: '其他',
 }
@@ -206,42 +161,9 @@ function ToolManagerSection(): ReactElement {
     return () => { style.remove() }
   }, [])
 
-  const isEffectivelyDenied = (name: string): boolean => {
-    if (cfg.allowNames.includes(name)) return false
-    if (cfg.allowPrefixes.some((p) => name.startsWith(p))) return false
-    if (cfg.denyNames.includes(name)) return true
-    if (cfg.denyPrefixes.some((p) => name.startsWith(p))) return true
-    if (DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p))) return true
-    if (name.startsWith('mcp__')) return cfg.newDefault.mcp === 'disabled'
-    if (THIRD_PREFIXES.some((p) => name.startsWith(p))) return cfg.newDefault.third === 'disabled'
-    return false
-  }
-
-  /**
-   * 该类工具「启用」时必须补写 allowNames 才能生效:它们除了 denyNames 之外
-   * 还有一层兜底判定,仅把名字从 denyNames 移除不足以让它们可见。
-   *   - MCP(mcp__*)      : isEffectivelyDenied 走 newDefault.mcp 兜底,
-   *                        默认禁用时无条件判禁,与 denyNames 内容无关。
-   *   - 第三方前缀        : DEFAULT_THIRD_PREFIXES 命中即无条件判禁。
-   * 两者统一走 allowNames(判定链中优先级最高)豁免,保证启用/禁用双向都真实生效。
-   */
-  const needsAllowExemption = (name: string): boolean =>
-    name.startsWith('mcp__') || DEFAULT_THIRD_PREFIXES.some((p) => name.startsWith(p))
-
-  // 把单个工具设为启用/禁用,返回新 Config(双向清理 allow/deny 名单,避免残留复活)。
-  const applyDeny = (cfg0: Config, name: string, denied: boolean): Config => {
-    const next: Config = { ...cfg0, denyNames: [...cfg0.denyNames], allowNames: [...cfg0.allowNames] }
-    if (denied) {
-      if (!next.denyNames.includes(name)) next.denyNames.push(name)
-      next.allowNames = next.allowNames.filter((n) => n !== name)
-    } else {
-      next.denyNames = next.denyNames.filter((n) => n !== name)
-      if (needsAllowExemption(name) && !next.allowNames.includes(name)) {
-        next.allowNames.push(name)
-      }
-    }
-    return next
-  }
+  // 工具/上下文的启停判定与「启用需补写 allowNames」的规则已抽到 ./decide.ts
+  // (纯函数模块,可被 tests/decide.test.mjs 回归;判定链必须与 clean-tool-filter.mjs
+  //  的 shouldDeny / 2c 分支逐条对齐)。
 
   const persist = (next: Config): void => {
     void (async () => {
@@ -290,7 +212,7 @@ function ToolManagerSection(): ReactElement {
   const matches = (t: ToolRow): boolean => {
     const q = query.trim().toLowerCase()
     if (q && !t.name.toLowerCase().includes(q) && !(t.description ?? '').toLowerCase().includes(q)) return false
-    const d = isEffectivelyDenied(t.name)
+    const d = isEffectivelyDenied(cfg, t.name)
     if (filter === 'enabled' && d) return false
     if (filter === 'denied' && !d) return false
     return true
@@ -351,21 +273,10 @@ function ToolManagerSection(): ReactElement {
     })
   }
 
-  // 上下文注入的纯函数式禁用/启用(denyContexts + allowContexts 双向清理)。
-  const applyContextDeny = (cfg0: Config, name: string, denied: boolean): Config => {
-    const next: Config = { ...cfg0, denyContexts: [...cfg0.denyContexts], allowContexts: [...cfg0.allowContexts] }
-    if (denied) {
-      if (!next.denyContexts.includes(name)) next.denyContexts.push(name)
-      next.allowContexts = next.allowContexts.filter((n) => n !== name)
-    } else {
-      next.denyContexts = next.denyContexts.filter((n) => n !== name)
-      if (!next.allowContexts.includes(name)) next.allowContexts.push(name)
-    }
-    return next
-  }
+  // 上下文注入的启停判定同样在 ./decide.ts(applyContextDeny / contextEnabled)。
 
   const toggleContext = (name: string): void => {
-    commit(applyContextDeny(cfg, name, contextEnabled(name)))
+    commit(applyContextDeny(cfg, name, contextEnabled(cfg, name)))
   }
 
   const selectAllContexts = (): void => {
@@ -386,13 +297,6 @@ function ToolManagerSection(): ReactElement {
 
   const disableAllContexts = (): void => {
     commit({ ...cfg, denyContexts: [...contextNames], allowContexts: [] })
-  }
-
-  /** 上下文是否实际启用:显式启用 > 显式禁用 > 新增锁定默认。 */
-  const contextEnabled = (name: string): boolean => {
-    if (cfg.allowContexts.includes(name)) return true
-    if (cfg.denyContexts.includes(name)) return false
-    return cfg.newDefault.context !== 'disabled'
   }
 
   /** 切换某层的「新增锁定」:enabled=新出现的内容默认可用,disabled=默认屏蔽。 */
@@ -700,7 +604,7 @@ function ToolManagerSection(): ReactElement {
                 </div>
                 <div className="tm-tools">
                   {contextNames.map((name) => {
-                    const enabled = contextEnabled(name)
+                    const enabled = contextEnabled(cfg, name)
                     const sel = selected.has(name)
                     return (
                       <div
@@ -775,7 +679,7 @@ function ToolManagerSection(): ReactElement {
                     {!isCollapsed ? (
                       <div className="tm-tools">
                         {sub.rows.map((t) => {
-                          const denied = isEffectivelyDenied(t.name)
+                          const denied = isEffectivelyDenied(cfg, t.name)
                           const sel = selected.has(t.name)
                           return (
                             <div

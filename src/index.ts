@@ -12,14 +12,17 @@
  *   POST /tool-manager/api/config  保存配置(denyPrefixes/denyNames/allowPrefixes/allowNames)
  *
  * 工具来源分类(category):
- *   - mcp     : 以 mcp__ 开头(宿主 dsh-mcp-manager 注册的 MCP 工具)
- *   - native  : clean-agent 预设装配的原生工具(经 standing scope 注册)
- *   - third   : 宿主层第三方插件注册的全局工具(默认会被 clean-agent 屏蔽)
- *   - unknown : 其他
+ *   - mcp     : 以 mcp__ 开头(宿主 MCP 连接器注册的 MCP 工具)
+ *   - native  : 白名单内的 DSH 官方宿主工具(见 NATIVE_HOST_TOOLS;三个 MCP 共享
+ *               资源工具 + load_workspace_dependencies)
+ *   - third   : 其余一切宿主层全局工具(= 第三方插件注册的,纯净预设默认屏蔽)
+ *   - unknown : 预留,当前不会产生
  *
  * 说明:枚举的是工具的 GLOBAL 注册面(view(undefined).knownNames),与任何
  * 具体会话无关,因此设置页能看到「如果启用,这个工具会出现在纯净预设里」
  * 的完整候选;默认屏蔽名单见 clean-tool-filter.mjs 的 DEFAULT_DENY_PREFIXES。
+ * 注意 DSH 的原生工具(read/write/pwsh/glob 等)由 agent preset 在会话作用域
+ * 注册,不进全局寄存器,GUI 无法枚举它们。
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -140,15 +143,38 @@ function writeConfig(cfg: Config): boolean {
   }
 }
 
-// 分类工具来源
-function classify(name: string): string {
+// DSH 官方在「宿主装配层」注册进全局工具寄存器的工具白名单。
+//
+// 【2026-10-11 修复】旧实现的 classify() 用「硬编码第三方前缀 + 兜底归 native」，
+// 于是任何**没被列举**的新第三方插件工具都会被显示成「DSH 原生工具（默认启用）」。
+// 实测:宿主层 dsh-asar-patcher 的 6 个 asar_* 工具(asar_info/entries/read/splice/
+// restore/backup)一直躺在 native 组里,而纯净预设本该默认屏蔽它们 —— 分类错误的
+// 方向恰好是「漏屏蔽」,后果比误屏蔽严重。
+//
+// 现在改成白名单制:只有下面这些经过源码核实的官方宿主工具算 native,其余一律 third。
+// 依据(app.asar 内官方源码与文档):
+//   - @deepseek-ai/dsh-mcp-resources 的 registerResourceTools() 向消费方工具作用域
+//     注册三个「共享资源工具」:
+//       list_mcp_resources / list_mcp_resource_templates / read_mcp_resource
+//     (官方文档原文:"The three shared resource tools";它们不是 dsh-mcp-connector
+//      插件的工具 —— 该插件注册的是 mcp_connector_* 一族。)
+//   - @deepseek-ai/dsh-tool-workspace-dependencies 注册 load_workspace_dependencies。
+// 另注:DSH 的原生工具(read/write/pwsh/glob/…)由 agent preset 在**会话作用域**注册,
+// 不进入全局寄存器,因此 GUI 本来也看不到它们(这也是本页 native 组长期只有个位数的原因)。
+export const NATIVE_HOST_TOOLS = new Set([
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+  'load_workspace_dependencies',
+])
+
+// 分类工具来源(导出供 tests/classify.test.mjs 回归)
+export function classify(name: string): string {
   if (name.startsWith('mcp__')) return 'mcp'
-  if (name.startsWith('dev_') || name.startsWith('memory') || name.startsWith('dtodo')
-    || name.startsWith('skill_manage') || name.startsWith('undo_') || name.startsWith('redteam_')
-    || name.startsWith('ssh_') || name.startsWith('context_audit') || name.startsWith('describe_image')
-    || name.startsWith('de_') || name.startsWith('anysearch_') || name.startsWith('file_mount_forget')
-    || name.startsWith('mcp_connector_')) return 'third'
-  return 'native'
+  if (NATIVE_HOST_TOOLS.has(name)) return 'native'
+  // 兜底 = third。宁可把未知工具当第三方(纯净预设默认屏蔽,可在 GUI 里按需启用),
+  // 也不要把它当官方工具默认放行。
+  return 'third'
 }
 
 // 第三方工具 → 归属大插件(显示组名)。顺序即优先级(长前缀在前)。
@@ -167,6 +193,7 @@ const THIRD_PLUGIN_MAP: Array<[string, string]> = [
   ['describe_image', 'describe-image'],
   ['file_mount_forget', 'dsh-file-mount'],
   ['mcp_connector_', 'dsh-mcp-connector'],
+  ['asar_', 'dsh-asar-patcher'],
 ]
 
 // 计算工具的分组键:mcp 按 server 名、third 按归属插件、其余按 category。
