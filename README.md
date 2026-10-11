@@ -45,6 +45,29 @@ DeepSeek Harness 是高度插件化的宿主：宿主层（HOST 组合）会注�
 - **不硬依赖 webServer**：`inject` 是空数组。若把 `'webServer'` 写进 inject，
   插件在无 HTTP 服务的 profile（headless / tui）里会整体 pending，连预设都装不进去。
 
+### 预设内容与官方 `standard` 的关系
+
+内置 preset 的定位是「**官方 standard 的能力集，减去第三方插件的提示词与工具面**」，所以
+官方行必须逐个对齐 —— 少一行不是"少个功能"，而可能是**整个预设作废**：
+
+| 曾经漏掉的行 | 后果 | 教训 |
+|---|---|---|
+| `command-goal` | 模型工具 `create_goal/get_goal/update_goal` 可用，但 `/` 面板里没有 `/goal` | 命令 producer 是**按 preset 逐个挂载**的（官方 dsh-command-goal 的 README 明确写了：Web bundle 把 goal 服务留在 Host、禁用基础 producer，改在 standard/code/cordis 里挂） |
+| `plan-mode` 的 `section` | registry 记 `broken: "PlanModeConfig needs a non-empty section"` → **整个 clean-agent 不可用** | `section` 是**必填** config，不是可选；漏了比不加更糟 |
+| `delegation` 整组 | 没有 `subagent` / `subagent_fork` / `workflow` | 官方 capability 组要么整组抄，要么整组不加 |
+| `present` / `tool-bash` | 少交付物工具；非 Windows 平台完全没有 shell 工具 | `tool-bash` 与 `tool-pwsh` 是**平台互斥的一对**，两个都要装配、由 `disabled` 决定谁生效 |
+
+**Host 前置依赖**：`delegation` 里的 `tool-subagent` 配了 `modelSelectionSettings: true`，它要求
+Host scope 里存在 `@deepseek-ai/dsh-tool-subagent/model-selection-settings` —— 该行由
+**`@deepseek-ai/dsh-web-app`** 的 "web-only host rows" 提供。`desktop` / `backup` / `web`
+三个 profile 都带 web-app，所以真实部署没问题；`headless`/`tui` 之类不带 web-app 的 profile
+会因缺这一行而 broken（真要在那种 profile 用，得自己补这行）。
+
+> 改动这个 preset 后**务必**用隔离 profile 验证 `broken`（见 `tests/preset.test.mjs` 的四条约束：
+> `command-goal`/`delegation`/`present` 齐全、`plan-mode.section` 非空、`tool-bash`+`tool-pwsh` 成对、
+> `modelSelectionSettings` 的声明）。探针脚本做法：临时 profile 里只插插件行 + `agent-preset-registry`
+> + 一个读 `agentPresets.definitions.get('clean-agent').broken` 的探针，跑一次 `dsh --profile <tmp> "..."`。
+
 ```js
 // 需要自定义时（例如换 persona 前缀）：
 import { buildCleanAgentPreset } from '@dsh-external/dsh-tool-manager'

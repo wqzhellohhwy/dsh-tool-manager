@@ -78,3 +78,65 @@ test('工具面覆盖 DSH 原生工具集合', () => {
     assert.ok(ids.has(need), `预设缺少 ${need}`)
   }
 })
+
+// ── 2026-10-12：补齐官方 standard 的功能行 ──────────────────────────────────
+
+test('补齐 standard 有的官方行（命令 / 计划模式 / 子agent / present / 插件管理）', () => {
+  const ids = new Set(preset.plugins.map((p) => p.id))
+  for (const need of ['command-goal', 'planning', 'delegation', 'present', 'tool-plugin-manager', 'tool-bash']) {
+    assert.ok(ids.has(need), `预设缺少官方行 ${need}`)
+  }
+})
+
+test('delegation 组含全部子 agent / workflow 行（照抄官方 standard）', () => {
+  const deleg = preset.plugins.find((p) => p.id === 'delegation')
+  assert.ok(deleg, '缺少 delegation 组')
+  assert.equal(deleg.group, true)
+  assert.deepEqual(deleg.isolate, { workflowEngine: true })
+  const dIds = deleg.config.map((x) => x.id)
+  for (const need of ['tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent',
+    'tool-subagent-fork', 'tool-subagent-codex', 'tool-subagent-claude-code',
+    'workflow-ptc', 'tool-workflow', 'tool-ralph']) {
+    assert.ok(dIds.includes(need), `delegation 缺少 ${need}`)
+  }
+  const sub = deleg.config.find((x) => x.id === 'tool-subagent')
+  assert.equal(sub.name, '@deepseek-ai/dsh-tool-subagent')
+  assert.equal(sub.config.toolName, 'subagent', '工具名必须显式声明，否则工具面与 standard 不一致')
+  // codex / claude-code provider 官方默认关闭，这里照抄
+  assert.equal(deleg.config.find((x) => x.id === 'tool-subagent-codex').disabled, true)
+  assert.equal(deleg.config.find((x) => x.id === 'tool-subagent-claude-code').disabled, true)
+  assert.equal(deleg.config.find((x) => x.id === 'tool-ralph').disabled, true)
+})
+
+test('plan-mode 必须带非空 section —— 漏了会让整个预设装配失败', () => {
+  // 实测教训：@deepseek-ai/dsh-plan-mode 的 section 是必填 config，不给会
+  // registry 记 broken: "PlanModeConfig needs a non-empty section"，整个 clean-agent
+  // 直接不可用（不是"少一个工具"，是全部作废）。
+  const planning = preset.plugins.find((p) => p.id === 'planning')
+  assert.ok(planning, '缺少 planning 组')
+  assert.equal(planning.group, true)
+  assert.deepEqual(planning.isolate, { planMode: true })
+  const pm = planning.config.find((x) => x.id === 'plan-mode')
+  assert.ok(pm, '缺少 plan-mode 行')
+  assert.equal(typeof pm.config?.section, 'string')
+  assert.ok(pm.config.section.length > 500, 'section 必须是官方那段完整文本')
+  assert.ok(pm.config.section.includes('exit_plan_mode'), 'section 应指示如何退出计划模式')
+})
+
+test('subagent 的 modelSelectionSettings 依赖 Host 前置（真实部署由 dsh-web-app 提供）', () => {
+  // 它要求 Host scope 里有 @deepseek-ai/dsh-tool-subagent/model-selection-settings，
+  // 该行由 @deepseek-ai/dsh-web-app 的 "web-only host rows" 提供 —— desktop / backup / web
+  // 三个 profile 都带 web-app，所以真实部署没问题；headless 之类没带的 profile 会
+  // 报 broken（这也是隔离验证时先补这行才能装上的原因）。
+  const deleg = preset.plugins.find((p) => p.id === 'delegation')
+  const sub = deleg.config.find((x) => x.id === 'tool-subagent')
+  assert.equal(sub.config.modelSelectionSettings, true)
+})
+
+test('shell 行两个平台都装配，由 disabled 决定生效（不能只留 pwsh）', () => {
+  const bash = preset.plugins.find((p) => p.id === 'tool-bash')
+  const pwsh = preset.plugins.find((p) => p.id === 'tool-pwsh')
+  assert.ok(bash && pwsh)
+  assert.equal(bash.disabled, process.platform === 'win32')
+  assert.equal(pwsh.disabled, process.platform !== 'win32')
+})
