@@ -103,6 +103,9 @@ const styles = `
 .tm-batch.tm-sticky{position:sticky;top:8px;z-index:30;box-shadow:0 2px 10px rgba(0,0,0,.18)}
 .tm-label{font-size:12px;color:var(--dsw-alias-label-tertiary);min-width:44px}
 .tm-batch.tm-rows{flex-direction:column;align-items:stretch}
+/* 顶部批量操作行：按钮统一 mini 后仍要保证单行显示；窄面板时横向滚动而不是换行折成两排。 */
+.tm-batch.tm-nowrap{flex-wrap:nowrap;gap:6px;overflow-x:auto}
+.tm-batch.tm-nowrap .tm-btn{flex:0 0 auto}
 .tm-batch-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tm-save-row{display:flex;gap:8px;align-items:center;margin-top:12px}
 .tm-status{font-size:13px;color:var(--dsw-alias-state-success-primary)}
@@ -566,22 +569,22 @@ function ToolManagerSection(): ReactElement {
             {query.trim() || filter !== 'all' ? `，筛选后 ${filteredTools.length} 个` : ''}
           </div>
 
-          <div className="tm-batch tm-sticky">
+          <div className="tm-batch tm-sticky tm-nowrap">
             <span className="tm-count">已选 {selected.size} 个</span>
-            <button className="tm-btn tm-blue" onClick={toggleSelectAll} title="选中除官方 DSH 原生工具外的所有可见工具">
+            <button className="tm-btn tm-mini tm-blue" onClick={toggleSelectAll} title="选中除官方 DSH 原生工具外的所有可见工具">
               {allSelectableSelected ? '取消全选' : '全选'}
             </button>
-            <button className="tm-btn tm-success" onClick={() => setSelectedDenied(false)} disabled={selected.size === 0}>
+            <button className="tm-btn tm-mini tm-success" onClick={() => setSelectedDenied(false)} disabled={selected.size === 0}>
               启用选中
             </button>
-            <button className="tm-btn tm-danger" onClick={() => setSelectedDenied(true)} disabled={selected.size === 0}>
+            <button className="tm-btn tm-mini tm-danger" onClick={() => setSelectedDenied(true)} disabled={selected.size === 0}>
               禁用选中
             </button>
-            <button className="tm-btn ghost" onClick={saveAsConfig} title="把当前工具/上下文启用状态保存为**新**命名配置（不含模式/新增策略/定型状态）">
+            <button className="tm-btn tm-mini ghost" onClick={saveAsConfig} title="把当前工具/上下文启用状态保存为**新**命名配置（不含模式/新增策略/定型状态）">
               保存为配置
             </button>
             <button
-              className="tm-btn ghost"
+              className="tm-btn tm-mini ghost"
               onClick={saveToSelectedConfig}
               disabled={!selectedConfigId}
               title={selectedConfigId
