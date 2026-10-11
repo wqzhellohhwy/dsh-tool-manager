@@ -21,6 +21,7 @@ import { Fragment, useEffect, useMemo, useState, type ReactElement, type ChangeE
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   EMPTY_CONFIG,
+  addSavedConfig,
   applyContextDeny,
   applyDeny,
   applyNewDefault,
@@ -28,6 +29,7 @@ import {
   filterNames,
   isEffectivelyDenied,
   modeOf,
+  overwriteSavedConfig,
   setLayerMode,
   type Config,
   type LayerMode,
@@ -173,7 +175,13 @@ function ToolManagerSection(): ReactElement {
   // (纯函数模块,可被 tests/decide.test.mjs 回归;判定链必须与 clean-tool-filter.mjs
   //  的 shouldDeny / 2c 分支逐条对齐)。
 
-  const persist = (next: Config): void => {
+  /**
+   * 落盘配置。
+   * @param okMessage 自定义成功提示（如"已覆盖保存到配置「X」"）；缺省用通用文案。
+   *   注意提示是**异步**写的（等 fetch 返回），所以调用方不能再自己 setStatus 一次 ——
+   *   那样会被这里的通用文案覆盖掉。
+   */
+  const persist = (next: Config, okMessage?: string): void => {
     void (async () => {
       try {
         const res = await fetch(`${API}/config`, {
@@ -182,16 +190,16 @@ function ToolManagerSection(): ReactElement {
           body: JSON.stringify(next),
         })
         const body = await res.json()
-        setStatus(body?.ok ? '✅ 已保存，新会话生效' : '❌ 保存失败：' + (body?.error ?? 'unknown'))
+        setStatus(body?.ok ? (okMessage ?? '✅ 已保存，下一轮生效') : '❌ 保存失败：' + (body?.error ?? 'unknown'))
       } catch (e) {
         setStatus('❌ 保存失败：' + String(e))
       }
     })()
   }
 
-  const commit = (next: Config): void => {
+  const commit = (next: Config, okMessage?: string): void => {
     setCfg(next)
-    persist(next)
+    persist(next, okMessage)
   }
 
   /** 名字 → 工具分类（用于判定与「启用需补 allowNames」）。上下文不属于任何工具分类。 */
@@ -387,10 +395,24 @@ function ToolManagerSection(): ReactElement {
     )
   }
 
-  // ── 命名配置(保存/启用/重命名/删除) ─────────────────────────────
+  // ── 命名配置(保存/覆盖保存/启用/重命名/删除) ─────────────────────
+
   const saveAsConfig = (): void => {
     setCfgEdit('save')
     setCfgNameInput('')
+  }
+
+  /**
+   * 「保存到已有配置」：把当前状态**覆盖**写入已选中的那个命名配置（不新建、不改名，
+   * 只更新它的 state 与 savedAt）。未选中配置时按钮是 disabled 的。
+   */
+  const saveToSelectedConfig = (): void => {
+    const id = selectedConfigId
+    if (!id) return
+    const target = cfg.configs.find((c) => c.id === id)
+    if (!target) return
+    commit(overwriteSavedConfig(cfg, id, new Date().toISOString()),
+      `✅ 已把当前状态覆盖保存到配置「${target.name}」`)
   }
 
   const startRenameConfig = (): void => {
@@ -404,21 +426,9 @@ function ToolManagerSection(): ReactElement {
     const name = cfgNameInput.trim()
     if (!name || !cfgEdit) return
     if (cfgEdit === 'save') {
-      const saved: SavedConfig = {
-        id: 'cfg-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        name,
-        savedAt: new Date().toISOString(),
-        state: {
-          denyPrefixes: [...cfg.denyPrefixes],
-          denyNames: [...cfg.denyNames],
-          allowPrefixes: [...cfg.allowPrefixes],
-          allowNames: [...cfg.allowNames],
-          denyContexts: [...cfg.denyContexts],
-          allowContexts: [...cfg.allowContexts],
-        },
-      }
-      commit({ ...cfg, configs: [...cfg.configs, saved] })
-      setSelectedConfigId(saved.id)
+      const id = 'cfg-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      commit(addSavedConfig(cfg, id, name, new Date().toISOString()))
+      setSelectedConfigId(id)
     } else if (cfgEdit === 'rename' && selectedConfigId) {
       commit({ ...cfg, configs: cfg.configs.map((c) => (c.id === selectedConfigId ? { ...c, name } : c)) })
     }
@@ -435,9 +445,8 @@ function ToolManagerSection(): ReactElement {
       allowNames: [...saved.state.allowNames],
       denyContexts: [...saved.state.denyContexts],
       allowContexts: [...saved.state.allowContexts],
-      // newDefault(新增锁定)不随配置切换
-    })
-    setStatus('✅ 已启用配置「' + saved.name + '」，新会话生效')
+      // mode / newDefault / baseline（模式与新增策略）不随配置切换
+    }, `✅ 已启用配置「${saved.name}」`)
   }
 
   const deleteSavedConfig = (): void => {
@@ -568,8 +577,18 @@ function ToolManagerSection(): ReactElement {
             <button className="tm-btn tm-danger" onClick={() => setSelectedDenied(true)} disabled={selected.size === 0}>
               禁用选中
             </button>
-            <button className="tm-btn ghost" onClick={saveAsConfig} title="把当前工具/上下文启用状态保存为命名配置（不含新增锁定状态）">
+            <button className="tm-btn ghost" onClick={saveAsConfig} title="把当前工具/上下文启用状态保存为**新**命名配置（不含模式/新增策略/定型状态）">
               保存为配置
+            </button>
+            <button
+              className="tm-btn ghost"
+              onClick={saveToSelectedConfig}
+              disabled={!selectedConfigId}
+              title={selectedConfigId
+                ? '把当前状态覆盖保存到下方选中的那个配置（不新建、不改名）'
+                : '先在下方点选一个配置，再把当前状态覆盖保存进去'}
+            >
+              保存到已有配置
             </button>
           </div>
 
@@ -592,7 +611,7 @@ function ToolManagerSection(): ReactElement {
             </div>
             <div className="tm-config-list">
               {cfg.configs.length === 0 ? (
-                <span className="tm-hint">暂无保存的配置：点击上方「保存为配置」保存当前状态</span>
+                <span className="tm-hint">暂无保存的配置：点击上方「保存为配置」新建，或先把当前状态存进去</span>
               ) : (
                 cfg.configs.map((c) => (
                   <button

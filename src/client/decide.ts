@@ -225,6 +225,42 @@ export function filterNames(names: string[], query: string): string[] {
   return names.filter((n) => n.toLowerCase().includes(q))
 }
 
+// ── 命名配置（保存 / 覆盖保存）────────────────────────────────────────────────
+
+/**
+ * 抽出当前的六个名单快照。
+ * 命名配置**只**存这六个名单 —— `mode`（模式）/ `newDefault`（新增策略）/ `baseline`
+ * （定型状态）属于"策略"，切换配置时保持不变。
+ */
+export function snapshotOf(cfg: Config): SavedConfig['state'] {
+  return {
+    denyPrefixes: [...cfg.denyPrefixes],
+    denyNames: [...cfg.denyNames],
+    allowPrefixes: [...cfg.allowPrefixes],
+    allowNames: [...cfg.allowNames],
+    denyContexts: [...cfg.denyContexts],
+    allowContexts: [...cfg.allowContexts],
+  }
+}
+
+/** 新建一个命名配置（追加到 configs 末尾）。 */
+export function addSavedConfig(cfg: Config, id: string, name: string, savedAt: string): Config {
+  const saved: SavedConfig = { id, name, savedAt, state: snapshotOf(cfg) }
+  return { ...cfg, configs: [...cfg.configs, saved] }
+}
+
+/**
+ * 把当前状态**覆盖**写入指定的命名配置：只更新目标项的 state 与 savedAt，
+ * 不新建、不改名、不动其它配置。id 不存在时原样返回。
+ */
+export function overwriteSavedConfig(cfg: Config, id: string, savedAt: string): Config {
+  if (!cfg.configs.some((c) => c.id === id)) return cfg
+  return {
+    ...cfg,
+    configs: cfg.configs.map((c) => (c.id === id ? { ...c, savedAt, state: snapshotOf(cfg) } : c)),
+  }
+}
+
 // ── 层模式（启用 / 禁用 / 新增，三选一互斥）与「新增启用/禁用」────────────────
 
 /**
