@@ -23,12 +23,14 @@ import {
   EMPTY_CONFIG,
   applyContextDeny,
   applyDeny,
-  applyFullToggle,
   applyNewDefault,
   contextEnabled,
   filterNames,
   isEffectivelyDenied,
+  modeOf,
+  setLayerMode,
   type Config,
+  type LayerMode,
   type LockState,
   type SavedConfig,
   type ToolCategory,
@@ -113,6 +115,8 @@ const styles = `
 .tm-h4-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tm-lock{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer;font-family:inherit}
 .tm-lock.off{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.tm-lock.active{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);font-weight:600}
+.tm-lock.active.off{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
 .tm-config{flex-direction:column;align-items:stretch}
 .tm-config-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .tm-config-list{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
@@ -324,20 +328,20 @@ function ToolManagerSection(): ReactElement {
       : tools.filter((t) => t.category === cat).map((t) => t.name)
 
   /**
-   * 「完全启用/禁用」：把该层**全部**项一次性置为启用/禁用。
-   * 做法是清空该层的显式名单 + 让这些项重新"未定型"，再设 newDefault —— 详见
-   * decide.ts 的 applyFullToggle。点完之后个别开关照常有效（不会被压住）。
+   * 切换该层的**持续模式**（启用模式 / 禁用模式 / 新增，三选一互斥）。
+   *
+   * 点已激活的那个模式按钮 = 退出模式，回到「新增」。
+   * 模式生效期间压制该层的一切个别设置；退出后原有名单原封不动。
    */
-  const fullToggle = (cat: LockCat, state: LockState): void => {
-    const names = categoryNames(cat)
-    if (names.length === 0) return
-    commit(applyFullToggle(cfg, cat, state, names))
+  const modeToggle = (cat: LockCat, mode: Exclude<LayerMode, 'new'>): void => {
+    const current = modeOf(cfg, cat)
+    commit(setLayerMode(cfg, cat, current === mode ? 'new' : mode))
   }
 
   /**
    * 「新增启用/禁用」：只决定**今后新出现**的工具/上下文默认是什么状态。
    * 现有项先按当前配置把状态固化进名单、再并入 baseline，因此状态不会突变；
-   * 之后只有 baseline 之外的新项才吃这个开关。
+   * 同时把该层切回「新增模式」（三种模式互斥）。
    */
   const newDefaultToggle = (cat: LockCat, state: LockState): void => {
     const names = categoryNames(cat)
@@ -345,6 +349,42 @@ function ToolManagerSection(): ReactElement {
       ? (n: string) => !contextEnabled(cfg, n)
       : (n: string) => isEffectivelyDenied(cfg, n, toolCatOf(n))
     commit(applyNewDefault(cfg, cat, state, names, isDenied))
+  }
+
+  /**
+   * 每行的三个模式按钮（启用模式 / 禁用模式 / 新增启用-禁用）。
+   * 三者互斥 ⇒ 任何时刻恰有一个处于激活态（active）。
+   */
+  const modeButtons = (cat: LockCat, hint: string): ReactElement => {
+    const mode = modeOf(cfg, cat)
+    const nd = cfg.newDefault[cat]
+    const next = nd === 'enabled' ? '禁用' : '启用'
+    return (
+      <>
+        <button
+          className={'tm-lock' + (mode === 'on' ? ' active' : '')}
+          onClick={() => modeToggle(cat, 'on')}
+          title={'启用模式：该层全部启用，压制一切个别设置（再点一次退出，回到新增模式）。' + hint}
+        >
+          启用模式
+        </button>
+        <button
+          className={'tm-lock' + (mode === 'off' ? ' active' : '')}
+          onClick={() => modeToggle(cat, 'off')}
+          title={'禁用模式：该层全部禁用，压制一切个别设置（再点一次退出，回到新增模式）。' + hint}
+        >
+          禁用模式
+        </button>
+        <button
+          className={'tm-lock' + (mode === 'new' ? ' active' : '') + (nd === 'disabled' ? ' off' : '')}
+          onClick={() => newDefaultToggle(cat, nd === 'enabled' ? 'disabled' : 'enabled')}
+          title={`新增模式：只决定今后「新出现」的项默认${next === '禁用' ? '启用' : '禁用'}`
+            + `（点它会先把现有项按当前状态定型，已有项不受影响；同时退出启用/禁用模式）。` + hint}
+        >
+          {LOCK_ICON[nd]} 新增{nd === 'enabled' ? '启用' : '禁用'}
+        </button>
+      </>
+    )
   }
 
   // ── 命名配置(保存/启用/重命名/删除) ─────────────────────────────
@@ -588,84 +628,21 @@ function ToolManagerSection(): ReactElement {
               <button className="tm-btn tm-mini tm-blue" onClick={selectAllContexts}>一键选中</button>
               <button className="tm-btn tm-mini tm-success" onClick={enableAllContexts}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={disableAllContexts}>一键禁用</button>
-              <button
-                className="tm-btn tm-mini tm-success"
-                onClick={() => fullToggle('context', 'enabled')}
-                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部上下文注入一律启用"
-              >
-                完全启用
-              </button>
-              <button
-                className="tm-btn tm-mini tm-danger"
-                onClick={() => fullToggle('context', 'disabled')}
-                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部上下文注入一律禁用"
-              >
-                完全禁用
-              </button>
-              <button
-                className={'tm-lock' + (cfg.newDefault.context === 'disabled' ? ' off' : '')}
-                onClick={() => newDefaultToggle('context', cfg.newDefault.context === 'enabled' ? 'disabled' : 'enabled')}
-                title={'新增锁定：今后「新出现」的上下文默认' + (cfg.newDefault.context === 'enabled' ? '启用' : '禁用')
-                  + '（现有项会先按当前状态定型，不受影响）'}
-              >
-                {LOCK_ICON[cfg.newDefault.context]} 新增{cfg.newDefault.context === 'enabled' ? '启用' : '禁用'}
-              </button>
+              {modeButtons('context', '')}
             </div>
             <div className="tm-batch-row">
               <span className="tm-label">第三方</span>
               <button className="tm-btn tm-mini tm-blue" onClick={() => selectCategory('third')}>一键选中</button>
               <button className="tm-btn tm-mini tm-success" onClick={() => enableCategory('third')}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={() => disableCategory('third')}>一键禁用</button>
-              <button
-                className="tm-btn tm-mini tm-success"
-                onClick={() => fullToggle('third', 'enabled')}
-                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部第三方工具一律启用"
-              >
-                完全启用
-              </button>
-              <button
-                className="tm-btn tm-mini tm-danger"
-                onClick={() => fullToggle('third', 'disabled')}
-                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部第三方工具一律禁用"
-              >
-                完全禁用
-              </button>
-              <button
-                className={'tm-lock' + (cfg.newDefault.third === 'disabled' ? ' off' : '')}
-                onClick={() => newDefaultToggle('third', cfg.newDefault.third === 'enabled' ? 'disabled' : 'enabled')}
-                title={'新增锁定：今后「新插件带出来的」第三方工具默认' + (cfg.newDefault.third === 'enabled' ? '启用' : '禁用')
-                  + '（现有项会先按当前状态定型，不受影响）'}
-              >
-                {LOCK_ICON[cfg.newDefault.third]} 新增{cfg.newDefault.third === 'enabled' ? '启用' : '禁用'}
-              </button>
+              {modeButtons('third', '')}
             </div>
             <div className="tm-batch-row">
               <span className="tm-label">MCP</span>
               <button className="tm-btn tm-mini tm-blue" onClick={() => selectCategory('mcp')}>一键选中</button>
               <button className="tm-btn tm-mini tm-success" onClick={() => enableCategory('mcp')}>一键启用</button>
               <button className="tm-btn tm-mini tm-danger" onClick={() => disableCategory('mcp')}>一键禁用</button>
-              <button
-                className="tm-btn tm-mini tm-success"
-                onClick={() => fullToggle('mcp', 'enabled')}
-                title="完全启用：清空该层所有个别设置（含显式禁用与定型状态），当前全部 MCP 工具一律启用"
-              >
-                完全启用
-              </button>
-              <button
-                className="tm-btn tm-mini tm-danger"
-                onClick={() => fullToggle('mcp', 'disabled')}
-                title="完全禁用：清空该层所有个别设置（含显式启用与定型状态），当前全部 MCP 工具一律禁用"
-              >
-                完全禁用
-              </button>
-              <button
-                className={'tm-lock' + (cfg.newDefault.mcp === 'disabled' ? ' off' : '')}
-                onClick={() => newDefaultToggle('mcp', cfg.newDefault.mcp === 'enabled' ? 'disabled' : 'enabled')}
-                title={'新增锁定：今后「新开的 MCP server」带出来的工具默认' + (cfg.newDefault.mcp === 'enabled' ? '启用' : '禁用')
-                  + '（现有项会先按当前状态定型，不受影响）'}
-              >
-                {LOCK_ICON[cfg.newDefault.mcp]} 新增{cfg.newDefault.mcp === 'enabled' ? '启用' : '禁用'}
-              </button>
+              {modeButtons('mcp', '')}
             </div>
           </div>
 
@@ -811,8 +788,9 @@ function ToolManagerSection(): ReactElement {
           </div>
           <div className="tm-hint">
             提示：启用/禁用即时自动保存，<b>下一轮请求即生效</b>（无需新建会话）。
-            「完全启用/禁用」= 清空该层所有个别设置（含定型状态），当前全部项统一启用或禁用，之后逐项调整照常有效。
-            「新增启用/禁用」= 只决定<b>今后新出现</b>的项（新插件带出的工具、新开的 MCP server、新出现的上下文）默认是什么状态；点它的那一刻会把现有项按当前状态定型，因此不会影响已有工具。
+            每层有「启用模式 / 禁用模式 / 新增」三个按钮，<b>三者互斥</b>，任何时刻恰有一个是激活的：
+            启用模式 = 该层全部启用、禁用模式 = 该层全部禁用（两者都是持续开关，生效期间压制该层的个别设置，再点一次即退出、回到新增模式）；
+            新增 = 只决定<b>今后新出现</b>的项（新插件带出的工具、新开的 MCP server、新出现的上下文）默认是什么状态，点它的那一刻会把现有项按当前状态定型，因此已有项不受影响。
             所有操作只写纯净预设配置，不关闭 MCP/插件服务本身。
             配置文件：$DSH_HOME/.dsh/tool-manager.json
           </div>

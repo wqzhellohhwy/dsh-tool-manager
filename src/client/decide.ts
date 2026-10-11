@@ -45,6 +45,14 @@ export interface Config {
   allowContexts: string[]
   newDefault: NewDefault
   /**
+   * 每层的**持续模式**（三选一，互斥）：
+   *   'on'  启用模式 —— 该层全部启用，压制一切个别设置；
+   *   'off' 禁用模式 —— 该层全部禁用，压制一切个别设置；
+   *   'new' 新增模式 —— 按 baseline/newDefault 走常规判定（默认值）。
+   * 旧配置没有这个字段时一律按 'new' 处理 ⇒ 行为与改造前一致。
+   */
+  mode: LayerMode
+  /**
    * 已定型项名单（工具名 + 上下文名）。
    *
    * 「新增启用/禁用」的判定基线：**不在 baseline 里的项 = 新出现的项**，由
@@ -61,10 +69,23 @@ export interface Config {
 /** 工具来源分类（与 host classify 一致）。 */
 export type ToolCategory = 'native' | 'mcp' | 'third' | 'unknown'
 
+/** 每层的持续模式：启用 / 禁用 / 新增（三选一，互斥）。 */
+export type LayerMode = 'on' | 'off' | 'new'
+
+/** 每层的模式表。 */
+export type LayerModes = Record<LockCat, LayerMode>
+
+/** 读某层模式的防御性取值（旧配置没有这个字段）。 */
+export function modeOf(cfg: Config, cat: LockCat): LayerMode {
+  const raw = cfg.mode?.[cat]
+  return raw === 'on' || raw === 'off' ? raw : 'new'
+}
+
 export const EMPTY_CONFIG: Config = {
   denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
   denyContexts: [], allowContexts: [],
   newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+  mode: { context: 'new', third: 'new', mcp: 'new' },
   baseline: [],
   configs: [],
 }
@@ -96,22 +117,31 @@ function baselineOf(cfg: Config): string[] {
 
 /** 工具当前是否被纯净预设屏蔽(GUI 的显示口径)。 */
 export function isEffectivelyDenied(cfg: Config, name: string, category?: ToolCategory): boolean {
-  // ① 显式名单永远优先。「完全启用/禁用」是通过**清空该分类的显式名单 + 重置定型**
-  //    来达成全局效果的，而不是靠一个持续压制名单的开关 —— 这样点完之后个别调整照常有效。
+  // ① native（host 白名单核实的官方宿主工具）不参与**兜底**屏蔽，但仍可被显式
+  //    名单禁用、也会被层模式压制 —— 所以这里只算分类，不做提前返回。
+  const lockCat = lockCategoryOf(name, category)
+
+  // ② 持续模式排在最前：这是"模式"，要压制一切个别设置。
+  if (lockCat !== null) {
+    const mode = modeOf(cfg, lockCat)
+    if (mode === 'on') return false
+    if (mode === 'off') return true
+  }
+
+  // ③ 新增模式：显式名单优先（native 也认这两层）。
   if (cfg.allowNames.includes(name)) return false
   if (cfg.allowPrefixes.some((p) => name.startsWith(p))) return false
   if (cfg.denyNames.includes(name)) return true
   if (cfg.denyPrefixes.some((p) => name.startsWith(p))) return true
 
-  // ② native（host 白名单核实的官方宿主工具）不参与屏蔽。
-  const lockCat = lockCategoryOf(name, category)
+  // ④ native / 无法分类：不参与兜底屏蔽。
   if (lockCat === null) return false
 
-  // ③ 已定型（进过 baseline）且未列名 ⇒ 启用。这就是「新增锁定」的本意：
+  // ⑤ 已定型（进过 baseline）且未列名 ⇒ 启用。这就是「新增锁定」的本意：
   //    老项的状态在点「新增X用」时已固化进名单，不再受 newDefault 影响。
   if (baselineOf(cfg).includes(name)) return false
 
-  // ④ 未定型 = 新出现的项 ⇒ 由「新增启用/禁用」决定。
+  // ⑥ 未定型 = 新出现的项 ⇒ 由「新增启用/禁用」决定。
   return cfg.newDefault[lockCat] === 'disabled'
 }
 
@@ -139,6 +169,9 @@ export function needsAllowExemption(cfg: Config, name: string, category?: ToolCa
   if (cfg.denyPrefixes.some((p) => name.startsWith(p))) return true
   const lockCat = lockCategoryOf(name, category)
   if (lockCat === null) return false
+  // 层模式不是"新增"时，个别开关都被模式压制：启用模式本来就可见，
+  // 禁用模式下写 allowNames 也不会生效 —— 两种情况都不需要补。
+  if (modeOf(cfg, lockCat) !== 'new') return false
   if (baselineOf(cfg).includes(name)) return false
   return cfg.newDefault[lockCat] === 'disabled'
 }
@@ -171,8 +204,11 @@ export function applyContextDeny(cfg0: Config, name: string, denied: boolean): C
   return next
 }
 
-/** 上下文是否实际启用:显式启用 > 显式禁用 > 已定型(启用) > 新增锁定默认。 */
+/** 上下文是否实际启用:启用模式/禁用模式 > 显式名单 > 已定型 > 新增锁定默认。 */
 export function contextEnabled(cfg: Config, name: string): boolean {
+  const mode = modeOf(cfg, 'context')
+  if (mode === 'on') return true
+  if (mode === 'off') return false
   if (cfg.allowContexts.includes(name)) return true
   if (cfg.denyContexts.includes(name)) return false
   if (baselineOf(cfg).includes(name)) return true
@@ -189,38 +225,21 @@ export function filterNames(names: string[], query: string): string[] {
   return names.filter((n) => n.toLowerCase().includes(q))
 }
 
-// ── 「完全启用/禁用」与「新增启用/禁用」──────────────────────────────────────
+// ── 层模式（启用 / 禁用 / 新增，三选一互斥）与「新增启用/禁用」────────────────
+
 /**
- * 「完全启用/禁用」：把某一层的**当前全部项**一次性置为启用或禁用。
+ * 切换某一层的**持续模式**。
  *
- * 实现方式是"推倒重来"而不是加压一个持续开关：
- *   ① 清空该层的显式名单（allow + deny）—— 否则残留的 allow 会挡住"完全禁用"；
- *   ② 把这些项从 baseline 移出 —— 它们重新变成"未定型"，于是统一吃 newDefault；
- *   ③ 设 newDefault[cat] = 目标状态。
- * 这样点完之后，个别工具的开关照常有最高优先级，不会出现"完全开关压在头上、
- * 单点无效"的死结。
+ *   'on'  启用模式：该层全部启用，压制一切个别设置；
+ *   'off' 禁用模式：该层全部禁用，压制一切个别设置；
+ *   'new' 新增模式：按 baseline/newDefault 走常规判定。
  *
- * @param allNames 该层的全部项（工具名或上下文名，由调用方按 cat 提供）。
+ * 三者互斥 —— 模式只有一个字段，设置任何一个都会让另外两个退出。
+ * 这是持续开关（不像旧版"完全启用/禁用"那样清空名单），因此**模式生效期间**
+ * 单个工具的开关不会起作用；退出模式（回到 'new'）后原有名单原封不动。
  */
-export function applyFullToggle(cfg: Config, cat: LockCat, state: LockState, allNames: string[]): Config {
-  const names = new Set(allNames)
-  const next: Config = {
-    ...cfg,
-    newDefault: { ...cfg.newDefault, [cat]: state },
-    baseline: baselineOf(cfg).filter((n) => !names.has(n)),
-    denyNames: [...cfg.denyNames],
-    allowNames: [...cfg.allowNames],
-    denyContexts: [...cfg.denyContexts],
-    allowContexts: [...cfg.allowContexts],
-  }
-  if (cat === 'context') {
-    next.denyContexts = next.denyContexts.filter((n) => !names.has(n))
-    next.allowContexts = next.allowContexts.filter((n) => !names.has(n))
-  } else {
-    next.denyNames = next.denyNames.filter((n) => !names.has(n))
-    next.allowNames = next.allowNames.filter((n) => !names.has(n))
-  }
-  return next
+export function setLayerMode(cfg: Config, cat: LockCat, mode: LayerMode): Config {
+  return { ...cfg, mode: { ...(cfg.mode ?? EMPTY_CONFIG.mode), [cat]: mode } }
 }
 
 /**
@@ -244,7 +263,13 @@ export function applyNewDefault(
 ): Config {
   const frozen = allNames.filter((n) => isDenied(n))
   const baseline = [...new Set([...baselineOf(cfg), ...allNames])]
-  const next: Config = { ...cfg, baseline, newDefault: { ...cfg.newDefault, [cat]: state } }
+  // 点「新增X用」同时把该层切回**新增模式**（三种模式互斥，启用/禁用模式就此退出）。
+  const next: Config = {
+    ...cfg,
+    baseline,
+    newDefault: { ...cfg.newDefault, [cat]: state },
+    mode: { ...(cfg.mode ?? EMPTY_CONFIG.mode), [cat]: 'new' },
+  }
   if (cat === 'context') {
     next.denyContexts = [...new Set([...cfg.denyContexts, ...frozen])]
     next.allowContexts = cfg.allowContexts.filter((n) => !frozen.includes(n))

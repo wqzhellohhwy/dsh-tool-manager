@@ -79,10 +79,19 @@ function configFile(): string {
 
 type LockState = 'enabled' | 'disabled'
 
+/** 每层的持续模式：启用 / 禁用 / 新增（三选一互斥）。 */
+type LayerMode = 'on' | 'off' | 'new'
+
 interface NewDefault {
   context: LockState
   third: LockState
   mcp: LockState
+}
+
+interface LayerModes {
+  context: LayerMode
+  third: LayerMode
+  mcp: LayerMode
 }
 
 /** 保存的命名配置(不含 newDefault——「新增锁定」状态不随配置保存/切换)。 */
@@ -108,6 +117,8 @@ interface Config {
   denyContexts: string[]
   allowContexts: string[]
   newDefault: NewDefault
+  /** 每层的持续模式（on/off/new，三选一互斥）。 */
+  mode: LayerModes
   /** 已定型项名单（「新增启用/禁用」的判定基线，详见 client/decide.ts）。 */
   baseline: string[]
   configs: SavedConfig[]
@@ -117,12 +128,17 @@ const EMPTY: Config = {
   denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
   denyContexts: [], allowContexts: [],
   newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+  mode: { context: 'new', third: 'new', mcp: 'new' },
   baseline: [],
   configs: [],
 }
 
 function lockOf(v: unknown): LockState {
   return v === 'disabled' ? 'disabled' : 'enabled'
+}
+
+function modeOf(v: unknown): LayerMode {
+  return v === 'on' || v === 'off' ? v : 'new'
 }
 
 function readConfig(): Config {
@@ -141,6 +157,11 @@ function readConfig(): Config {
         context: lockOf(cfg?.newDefault?.context),
         third: lockOf(cfg?.newDefault?.third),
         mcp: lockOf(cfg?.newDefault?.mcp),
+      },
+      mode: {
+        context: modeOf(cfg?.mode?.context),
+        third: modeOf(cfg?.mode?.third),
+        mcp: modeOf(cfg?.mode?.mcp),
       },
       baseline: Array.isArray(cfg?.baseline) ? cfg.baseline : [],
       configs: Array.isArray(cfg?.configs) ? cfg.configs : [],
@@ -366,6 +387,11 @@ export function apply(ctx: AppContext): void {
                 context: lockOf(body?.newDefault?.context),
                 third: lockOf(body?.newDefault?.third),
                 mcp: lockOf(body?.newDefault?.mcp),
+              },
+              mode: {
+                context: modeOf(body?.mode?.context),
+                third: modeOf(body?.mode?.third),
+                mcp: modeOf(body?.mode?.mcp),
               },
               baseline: Array.isArray(body?.baseline) ? body.baseline : [],
               configs: Array.isArray(body?.configs) ? body.configs : [],

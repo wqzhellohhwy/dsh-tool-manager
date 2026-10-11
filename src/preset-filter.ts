@@ -93,6 +93,8 @@ interface GuiConfig {
   denyContexts: string[]
   allowContexts: string[]
   newDefault: { context: string; third: string; mcp: string }
+  /** 每层的持续模式：'on' 全启用 / 'off' 全禁用 / 'new' 按 baseline+newDefault。 */
+  mode: { context: string; third: string; mcp: string }
   /** 已定型项名单：不在其中的 = 新出现的项，由 newDefault 决定。 */
   baseline: string[]
 }
@@ -163,6 +165,11 @@ function readGuiConfig(): GuiConfig {
         mcp: cfg?.newDefault?.mcp === 'disabled' ? 'disabled' : 'enabled',
       },
       baseline: Array.isArray(cfg?.baseline) ? cfg.baseline : [],
+      mode: {
+        context: cfg?.mode?.context === 'on' || cfg?.mode?.context === 'off' ? cfg.mode.context : 'new',
+        third: cfg?.mode?.third === 'on' || cfg?.mode?.third === 'off' ? cfg.mode.third : 'new',
+        mcp: cfg?.mode?.mcp === 'on' || cfg?.mode?.mcp === 'off' ? cfg.mode.mcp : 'new',
+      },
     }
   } catch {
     // 配置缺失/损坏时回退默认,绝不阻断装配。
@@ -170,6 +177,7 @@ function readGuiConfig(): GuiConfig {
       denyPrefixes: [], denyNames: [], allowPrefixes: [], allowNames: [],
       denyContexts: [], allowContexts: [],
       newDefault: { context: 'enabled', third: 'enabled', mcp: 'enabled' },
+      mode: { context: 'new', third: 'new', mcp: 'new' },
       baseline: [],
     }
   }
@@ -182,19 +190,27 @@ export function apply(ctx: FilterContext, rawConfig?: unknown): void {
 
   // 屏障 2a:全局工具层视图,动态筛选要剔除的工具名。
   // 判定优先级(高→低,与 dsh-tool-manager 的 isEffectivelyDenied 严格一致):
-  //   allowNames > allowPrefixes(用户) > denyNames > denyPrefixes(用户)
-  //   > 官方宿主工具白名单放行 > 已定型(baseline)放行 > newDefault 兜底。
+  //   官方宿主工具白名单放行 > 层模式(on 全放 / off 全禁)
+  //   > allowNames/allowPrefixes > denyNames/denyPrefixes
+  //   > 已定型(baseline)放行 > newDefault 兜底。
   //
   // 关键点:「是否第三方」不再靠前缀表猜,而是「不在 NATIVE_HOST_TOOLS 白名单里
   // 就是第三方」—— 未知前缀的新插件工具因此也会被「新增锁定」管住。
+  // 模式是持续开关,生效期间压制一切个别名单。
   const shouldDeny = (toolName: string): boolean => {
+    const isMcp = toolName.startsWith('mcp__')
+    const isThird = !NATIVE_HOST_TOOLS.has(toolName)
+    const lockCat = isMcp ? 'mcp' : (isThird ? 'third' : null)
+    if (lockCat !== null) {
+      const mode = gui.mode[lockCat]
+      if (mode === 'on') return false
+      if (mode === 'off') return true
+    }
     if (gui.allowNames.includes(toolName)) return false
     if (gui.allowPrefixes.some((p) => toolName.startsWith(p))) return false
     if (gui.denyNames.includes(toolName)) return true
     if (gui.denyPrefixes.some((p) => toolName.startsWith(p))) return true
-    const isMcp = toolName.startsWith('mcp__')
-    const isThird = !NATIVE_HOST_TOOLS.has(toolName)
-    if (!isMcp && !isThird) return false
+    if (lockCat === null) return false
     // 已定型项（在 baseline 里）不再受「新增」开关影响。
     if (gui.baseline.includes(toolName)) return false
     return isMcp ? gui.newDefault.mcp === 'disabled' : gui.newDefault.third === 'disabled'
@@ -268,13 +284,16 @@ export function apply(ctx: FilterContext, rawConfig?: unknown): void {
         }
       }
       // 2c:过滤动态上下文。判定优先级(与 contextEnabled 严格一致):
-      //   allowContexts(显式启用) > denyContexts(显式禁用)
-      //   > 已定型(baseline)放行 > 新增锁定(disabled ⇒ 未定型的新上下文默认剔除)。
+      //   层模式(on 全注入 / off 全不注入) > allowContexts > denyContexts
+      //   > 已定型(baseline)注入 > 新增锁定(disabled ⇒ 未定型的新上下文默认剔除)。
       if (Array.isArray(assembled.contexts)) {
+        const ctxMode = gui.mode.context
         const ndContext = gui.newDefault.context
         const keptContexts = assembled.contexts.filter((c: any) => {
           const contextName = c && c.name
           if (typeof contextName !== 'string') return true
+          if (ctxMode === 'on') return true
+          if (ctxMode === 'off') return false
           if (gui.allowContexts.includes(contextName)) return true
           if (gui.denyContexts.includes(contextName)) return false
           if (gui.baseline.includes(contextName)) return true

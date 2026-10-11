@@ -17,11 +17,13 @@ import assert from 'node:assert/strict'
 import {
   EMPTY_CONFIG,
   applyDeny,
-  applyFullToggle,
   applyNewDefault,
   contextEnabled,
   filterNames,
   isEffectivelyDenied,
+  modeOf,
+  needsAllowExemption,
+  setLayerMode,
 } from '../lib/decide.mjs'
 
 /** 纯净预设的典型配置：三层「新增锁定」全为禁用。 */
@@ -116,55 +118,86 @@ test('上下文同样支持「新增」语义', () => {
   assert.equal(contextEnabled(after, 'brandnew:context'), true, '新上下文按新增=启用')
 })
 
-// ── ⑤ 「完全启用/禁用」 ────────────────────────────────────────────────────
-test('完全禁用：清空该层个别设置后，全部项一律禁用', () => {
+// ── ⑤ 层模式（启用模式 / 禁用模式 / 新增，三选一互斥）────────────────────────
+test('禁用模式：持续压制该层显式启用，全部项一律禁用', () => {
   const cfg = {
     ...STRICT,
     baseline: ['asar_backup'],
-    allowNames: ['asar_backup'],            // 显式启用也要被"完全禁用"推平
+    allowNames: ['asar_backup'],            // 显式启用也要被模式压住
     denyNames: ['mcp__exa__web_search_exa'],
   }
-  const names = ['asar_backup', 'brandnew_tool']
-  const after = applyFullToggle(cfg, 'third', 'disabled', names)
+  const after = setLayerMode(cfg, 'third', 'off')
   assert.equal(isEffectivelyDenied(after, 'asar_backup', 'third'), true)
   assert.equal(isEffectivelyDenied(after, 'brandnew_tool', 'third'), true)
-  assert.equal(after.allowNames.includes('asar_backup'), false, '该层 allow 应被清空')
-  assert.equal(after.baseline.includes('asar_backup'), false, '该层应从 baseline 移除（重新未定型）')
+  // 模式不动名单：退出后原设置原封不动
+  assert.ok(after.allowNames.includes('asar_backup'), '模式不应清空名单')
+  assert.ok(after.baseline.includes('asar_backup'), '模式不应改动 baseline')
   // 其他层不受影响
   assert.equal(isEffectivelyDenied(after, 'mcp__exa__web_search_exa', 'mcp'), true)
 })
 
-test('完全启用：显式禁用也要被推平，全部项一律启用', () => {
+test('启用模式：持续压制该层显式禁用，全部项一律启用', () => {
   const cfg = {
     ...STRICT,
     denyNames: ['asar_backup', 'brandnew_tool'],
     baseline: ['brandnew_tool'],
   }
-  const names = ['asar_backup', 'brandnew_tool']
-  const after = applyFullToggle(cfg, 'third', 'enabled', names)
+  const after = setLayerMode(cfg, 'third', 'on')
   assert.equal(isEffectivelyDenied(after, 'asar_backup', 'third'), false)
   assert.equal(isEffectivelyDenied(after, 'brandnew_tool', 'third'), false)
-  assert.equal(after.denyNames.includes('asar_backup'), false, '该层 deny 应被清空')
+  assert.ok(after.denyNames.includes('asar_backup'), '模式不应清空名单')
 })
 
-test('完全启用/禁用之后，单个开关照常有最高优先级（不会被压住）', () => {
-  const names = ['asar_backup']
-  const full = applyFullToggle(STRICT, 'third', 'enabled', names)
-  assert.equal(isEffectivelyDenied(full, 'asar_backup', 'third'), false)
-  // 再单独禁用这一个
-  const one = applyDeny(full, 'asar_backup', true, 'third')
-  assert.equal(isEffectivelyDenied(one, 'asar_backup', 'third'), true)
-  // 再单独启用
-  const two = applyDeny(one, 'asar_backup', false, 'third')
-  assert.equal(isEffectivelyDenied(two, 'asar_backup', 'third'), false)
+test('退出模式（回到新增）后，原有名单恢复生效', () => {
+  const cfg = { ...STRICT, denyNames: ['asar_backup'] }
+  const off = setLayerMode(cfg, 'third', 'off')
+  assert.equal(isEffectivelyDenied(off, 'asar_backup', 'third'), true)
+  const back = setLayerMode(off, 'third', 'new')
+  assert.equal(isEffectivelyDenied(back, 'asar_backup', 'third'), true, '名单里的禁用仍生效')
+  const on = setLayerMode({ ...STRICT, denyNames: ['asar_backup'] }, 'third', 'on')
+  assert.equal(isEffectivelyDenied(on, 'asar_backup', 'third'), false, '启用模式压住显式禁用')
+  const back2 = setLayerMode(on, 'third', 'new')
+  assert.equal(isEffectivelyDenied(back2, 'asar_backup', 'third'), true, '退出启用模式后显式禁用恢复')
 })
 
-test('完全禁用上下文 / 完全启用上下文', () => {
+test('三种模式互斥：设置任何一个都会让另外两个退出', () => {
+  let cfg = setLayerMode(STRICT, 'mcp', 'on')
+  assert.equal(modeOf(cfg, 'mcp'), 'on')
+  cfg = setLayerMode(cfg, 'mcp', 'off')
+  assert.equal(modeOf(cfg, 'mcp'), 'off')
+  assert.notEqual(modeOf(cfg, 'mcp'), 'on')
+  // 点「新增X用」把该层切回 new
+  cfg = applyNewDefault(cfg, 'mcp', 'disabled', [], () => false)
+  assert.equal(modeOf(cfg, 'mcp'), 'new')
+  // 其他层不受影响
+  assert.equal(modeOf(cfg, 'third'), 'new')
+  assert.equal(modeOf(cfg, 'context'), 'new')
+})
+
+test('旧配置没有 mode 字段 ⇒ 按新增模式处理，不崩', () => {
+  const legacy = { ...STRICT }
+  delete legacy.mode
+  assert.equal(modeOf(legacy, 'third'), 'new')
+  assert.equal(isEffectivelyDenied(legacy, 'asar_backup', 'third'), true)
+  assert.equal(contextEnabled(legacy, 'memory:snapshot'), false)
+})
+
+test('模式对上下文同样生效（启用模式全注入 / 禁用模式全不注入）', () => {
   const contexts = ['memory:snapshot', 'sandbox:policy']
-  const off = applyFullToggle({ ...STRICT, allowContexts: ['memory:snapshot'] }, 'context', 'disabled', contexts)
+  const off = setLayerMode({ ...STRICT, allowContexts: ['memory:snapshot'] }, 'context', 'off')
   assert.equal(contextEnabled(off, 'memory:snapshot'), false)
   assert.equal(contextEnabled(off, 'sandbox:policy'), false)
-  const on = applyFullToggle({ ...STRICT, denyContexts: [...contexts] }, 'context', 'enabled', contexts)
+  const on = setLayerMode({ ...STRICT, denyContexts: [...contexts] }, 'context', 'on')
   assert.equal(contextEnabled(on, 'memory:snapshot'), true)
   assert.equal(contextEnabled(on, 'sandbox:policy'), true)
+})
+
+test('模式生效期间不补写 allowNames（写了也不会生效）', () => {
+  const off = setLayerMode({ ...STRICT, denyNames: ['brandnew_tool'] }, 'third', 'off')
+  assert.equal(needsAllowExemption(off, 'brandnew_tool', 'third'), false)
+  const on = setLayerMode(STRICT, 'third', 'on')
+  assert.equal(needsAllowExemption(on, 'brandnew_tool', 'third'), false)
+  // 回到新增模式后，才需要按兜底补写
+  const back = setLayerMode(off, 'third', 'new')
+  assert.equal(needsAllowExemption(back, 'brandnew_tool', 'third'), true)
 })
